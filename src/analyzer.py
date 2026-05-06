@@ -18,8 +18,7 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 WATCHLIST = [
-    "AAPL", "MSFT", "NVDA", "TSLA", "AMZN",
-    "GOOGL", "META", "AMD", "INTC", "SPY"
+    "MU", "SNDK", "NVDA", "TSLA"
 ]
 
 ET = pytz.timezone("America/New_York")
