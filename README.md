@@ -154,15 +154,7 @@ These have the strongest signals going into the open.
 4. Upload all 4 files keeping this exact folder structure:
 
 ```
-your-repo/
-├── .github/
-│   └── workflows/
-│       └── stock-alert.yml    ← the scheduler
-├── src/
-│   └── analyzer.py            ← the brain
-├── requirements.txt           ← Python packages
-└── README.md                  ← this file
-```
+
 
 > ⚠️ The `.github` folder must be at the **root** of the repo. If it ends up inside another folder the workflow will not trigger.
 
@@ -234,9 +226,6 @@ Yes — just add more tickers to `WATCHLIST`. Keep it under 20 to stay within th
 
 **I did not get a message at a certain hour. Is that normal?**  
 GitHub Actions cron can occasionally run a few minutes late or skip a run during peak load on their servers. This is rare and normal for the free tier.
-
-**Can I use this for Bursa Malaysia (KLSE) stocks?**  
-The current setup targets US markets only. KLSE uses a different ticker format (e.g. `1155.KL`) and different trading hours. It can be adapted with changes to the watchlist and schedule.
 
 **How do I stop the bot completely?**  
 Go to your repo → **Actions** tab → click **Stock Signal Bot** → click **Disable workflow**.
