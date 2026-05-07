@@ -549,12 +549,12 @@ def main():
             results.append(data)
 
     if not results:
-    send_telegram(
-        "⚠️ Stock Alert Bot: No data retrieved this cycle.\n"
-        f"Tried {len(WATCHLIST)} tickers — all failed.\n"
-        f"Time: {time_str}\nCheck Actions log for details."
-    )
-    return
+        send_telegram(
+            "⚠️ Stock Alert Bot: No data retrieved this cycle.\n"
+            f"Tried {len(WATCHLIST)} tickers — all failed.\n"
+            f"Time: {time_str}\nCheck Actions log for details."
+        )
+        return
 
     if deep_pm:
         msg = build_premarket_message(results, time_str)
