@@ -18,7 +18,8 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 WATCHLIST = [
-    "MU", "SNDK"
+    "AAPL", "MSFT", "NVDA", "TSLA", "AMZN",
+    "GOOGL", "META", "AMD", "INTC", "SPY"
 ]
 
 ET = pytz.timezone("America/New_York")
@@ -320,18 +321,25 @@ SESSION_EMOJI = {
     "Off-Hours":   "🌙",
 }
 
+SESSION_NAME_ZH = {
+    "Pre-Market":  "盘前交易",
+    "Market Hours":"交易时段",
+    "After-Hours": "盘后交易",
+    "Off-Hours":   "休市时段",
+}
+
 # ─── HUMAN-FRIENDLY HELPERS ───────────────────────────────────────────────────
 
 def signal_banner(signal: str) -> str:
     """Big clear action banner based on signal strength."""
     banners = {
-        "BUY STRONG": "✅✅ STRONG BUY — High confidence, multiple signals agree",
-        "BUY":        "✅ BUY — Looks good to enter",
-        "SELL STRONG":"❌❌ STRONG SELL — Get out, multiple signals turning bearish",
-        "SELL":       "❌ SELL — Consider exiting your position",
-        "HOLD":       "⏸ HOLD — No clear direction yet, wait and watch",
+        "BUY STRONG": "✅✅ STRONG BUY — 高度信心，多项指标一致看涨",
+        "BUY":        "✅ BUY — 可考虑入场",
+        "SELL STRONG":"❌❌ STRONG SELL — 多项指标转跌，建议离场",
+        "SELL":       "❌ SELL — 考虑减仓或观望",
+        "HOLD":       "⏸ HOLD — 信号混合，方向不明，继续等待",
     }
-    return banners.get(signal, "⏸ HOLD — No clear direction yet, wait and watch")
+    return banners.get(signal, "⏸ HOLD — 信号混合，方向不明，继续等待")
 
 def plain_reason(r: dict) -> list[str]:
     """
@@ -348,90 +356,90 @@ def plain_reason(r: dict) -> list[str]:
 
     # Momentum (RSI)
     if rsi < 30:
-        reasons.append(f"📉 Stock is oversold (RSI {rsi}) — price may bounce back up soon")
+        reasons.append(f"📉 超卖状态 (RSI {rsi}) — 价格可能即将反弹")
     elif rsi > 70:
-        reasons.append(f"📈 Stock is overbought (RSI {rsi}) — price may pull back soon")
+        reasons.append(f"📈 超买状态 (RSI {rsi}) — 价格可能面临回调")
     elif rsi < 45:
-        reasons.append(f"😐 Momentum is weak (RSI {rsi}) — buyers not yet in control")
+        reasons.append(f"😐 动能偏弱 (RSI {rsi}) — 买方尚未主导市场")
     else:
-        reasons.append(f"💪 Momentum is healthy (RSI {rsi}) — buyers are in control")
+        reasons.append(f"💪 动能健康 (RSI {rsi}) — 买方占据主动")
 
     # Trend (EMA / MA)
     if ema9 > ema21 and price > ma50:
-        reasons.append("📊 Short-term trend is UP — fast moving average above slow one")
+        reasons.append("📊 短期趋势向上 — EMA9 高于 EMA21，价格站上 MA50")
     elif ema9 < ema21 and price < ma50:
-        reasons.append("📊 Short-term trend is DOWN — fast moving average below slow one")
+        reasons.append("📊 短期趋势向下 — EMA9 低于 EMA21，价格跌破 MA50")
 
     if price > ma200:
-        reasons.append("🏔 Long-term trend is UP — price is above 200-day average")
+        reasons.append("🏔 长期趋势向上 — 价格高于 MA200（200日均线）")
     else:
-        reasons.append("🕳 Long-term trend is DOWN — price is below 200-day average")
+        reasons.append("🕳 长期趋势向下 — 价格低于 MA200（200日均线）")
 
     # Bollinger Bands
     if boll["squeeze"]:
-        reasons.append("🔵 Bands are very tight right now (squeeze) — a big move is likely coming soon, direction unknown")
+        reasons.append("🔵 Bollinger Band 收窄（Squeeze）— 即将出现大幅波动，方向待定")
     elif boll["breakout"] == "up":
-        reasons.append("⬆️ Price just broke above the upper band — strong upward momentum")
+        reasons.append("⬆️ 价格突破 BB 上轨 — 上涨动能强劲")
     elif boll["breakout"] == "down":
-        reasons.append("⬇️ Price just broke below the lower band — strong downward pressure")
+        reasons.append("⬇️ 价格跌破 BB 下轨 — 下行压力明显")
     elif boll["pct_b"] < 0.15:
-        reasons.append("📌 Price is near the bottom of its range — potential bounce zone")
+        reasons.append("📌 价格贴近 BB 下轨 (%B 低) — 潜在反弹区域")
     elif boll["pct_b"] > 0.85:
-        reasons.append("📌 Price is near the top of its range — watch for resistance")
+        reasons.append("📌 价格贴近 BB 上轨 (%B 高) — 注意压力位")
 
     # Volume
     if vol["surge"]:
         if price >= ma50:
-            reasons.append(f"🔥 Volume is {vol['ratio']}× higher than normal — big buyers are stepping in")
+            reasons.append(f"🔥 成交量异常放大 {vol['ratio']}× — 大买家正在进场")
         else:
-            reasons.append(f"🔥 Volume is {vol['ratio']}× higher than normal — big sellers are stepping in")
+            reasons.append(f"🔥 成交量异常放大 {vol['ratio']}× — 大卖家正在出货")
     elif vol["ratio"] < 0.5:
-        reasons.append("😴 Volume is very low — not many people are trading this right now")
+        reasons.append("😴 成交量极低 — 市场参与度不足，观望为主")
 
     # OBV (smart money)
     if obv["bull_diverge"]:
-        reasons.append("🧠 Smart money is quietly buying even as price dips (OBV divergence) — bullish hidden signal")
+        reasons.append("🧠 OBV 看涨背离 — 价格下跌但资金悄然流入，隐藏买入信号")
     elif obv["bear_diverge"]:
-        reasons.append("🧠 Smart money is quietly selling even as price rises (OBV divergence) — bearish hidden signal")
+        reasons.append("🧠 OBV 看跌背离 — 价格上涨但资金悄然流出，隐藏卖出信号")
     elif obv["obv_trend"] == "up":
-        reasons.append("💰 Overall money flow is moving INTO this stock")
+        reasons.append("💰 OBV 趋势向上 — 资金整体流入该股票")
     else:
-        reasons.append("💸 Overall money flow is moving OUT of this stock")
+        reasons.append("💸 OBV 趋势向下 — 资金整体流出该股票")
 
     # Stochastic
     if stoch["cross_up"]:
-        reasons.append("🔄 Momentum just turned upward from oversold zone — early buy signal")
+        reasons.append("🔄 Stochastic 从超卖区向上交叉 — 早期买入信号")
     elif stoch["cross_down"]:
-        reasons.append("🔄 Momentum just turned downward from overbought zone — early sell signal")
+        reasons.append("🔄 Stochastic 从超买区向下交叉 — 早期卖出信号")
 
     # VWAP
     if price > vwap:
-        reasons.append(f"📍 Price (${price}) is above today's average price (${vwap}) — buyers are in charge today")
+        reasons.append(f"📍 价格 ${price} 高于 VWAP ${vwap} — 今日买方主导")
     else:
-        reasons.append(f"📍 Price (${price}) is below today's average price (${vwap}) — sellers are in charge today")
+        reasons.append(f"📍 价格 ${price} 低于 VWAP ${vwap} — 今日卖方主导")
 
     # Gap (pre-market)
     if gap["gap_up"]:
-        reasons.append(f"🚀 Stock opened {gap['gap_pct']:+.1f}% higher than yesterday — strong overnight interest")
+        reasons.append(f"🚀 跳空高开 {gap['gap_pct']:+.1f}% — 隔夜买盘强劲")
     elif gap["gap_down"]:
-        reasons.append(f"💥 Stock opened {gap['gap_pct']:+.1f}% lower than yesterday — bad overnight news or selling")
+        reasons.append(f"💥 跳空低开 {gap['gap_pct']:+.1f}% — 隔夜利空或抛压较重")
 
     return reasons
 
 def confidence_bar(signal: str, buy_count: int, sell_count: int) -> str:
     """Visual confidence bar showing how many signals agree."""
-    total = 13  # max possible votes
+    total = 13
     if "BUY" in signal:
         filled = min(buy_count, total)
         bar = "🟩" * filled + "⬜" * (total - filled)
-        return f"Confidence: {bar} {buy_count}/{total} signals say BUY"
+        return f"信心指数: {bar} {buy_count}/{total} 项指标看涨"
     elif "SELL" in signal:
         filled = min(sell_count, total)
         bar = "🟥" * filled + "⬜" * (total - filled)
-        return f"Confidence: {bar} {sell_count}/{total} signals say SELL"
+        return f"信心指数: {bar} {sell_count}/{total} 项指标看跌"
     else:
         bar = "🟨" * 5 + "⬜" * 8
-        return f"Confidence: {bar} Mixed signals — not clear yet"
+        return f"信心指数: {bar} 信号混合，方向不明"
 
 def count_votes(r: dict) -> tuple[int, int]:
     """Re-count buy/sell votes from alerts and signal for confidence bar."""
@@ -456,7 +464,7 @@ def build_stock_card(r: dict, show_gap: bool = False) -> str:
     lines.append(confidence_bar(r["signal"], buy_v, sell_v))
     lines.append(f"")
 
-    lines.append("<b>Why?</b>")
+    lines.append("<b>分析原因：</b>")
     for reason in plain_reason(r):
         lines.append(f"  {reason}")
 
@@ -470,11 +478,12 @@ def build_stock_card(r: dict, show_gap: bool = False) -> str:
 
 def build_standard_message(results, session, time_str):
     emoji = SESSION_EMOJI.get(session, "")
+    session_zh = SESSION_NAME_ZH.get(session, session)
     lines = [
-        f"<b>📊 Stock Signal Report</b>",
-        f"{emoji} <b>{session}</b>  ·  {time_str}",
+        f"<b>📊 股票信号报告</b>",
+        f"{emoji} <b>{session_zh}</b>  ·  {time_str}",
         f"",
-        f"Here's what the market is telling us right now:",
+        f"以下是当前市场给出的信号：",
     ]
 
     order = {"BUY STRONG": 0, "BUY": 1, "HOLD": 2, "SELL": 3, "SELL STRONG": 4}
@@ -490,20 +499,20 @@ def build_standard_message(results, session, time_str):
     holds = sum(1 for r in results if r["signal"] == "HOLD")
 
     lines.append(f"")
-    lines.append(f"<b>Summary</b>")
-    lines.append(f"  ✅ {buys} stock(s) look good to BUY")
-    lines.append(f"  ❌ {sells} stock(s) suggest you SELL or avoid")
-    lines.append(f"  ⏸ {holds} stock(s) have no clear signal — wait")
+    lines.append(f"<b>汇总</b>")
+    lines.append(f"  ✅ {buys} 支股票信号看涨（BUY）")
+    lines.append(f"  ❌ {sells} 支股票信号看跌（SELL）")
+    lines.append(f"  ⏸ {holds} 支股票信号不明，建议观望")
     lines.append(f"")
-    lines.append(f"<i>⚠️ This is not financial advice. Always do your own research before trading.</i>")
+    lines.append(f"<i>⚠️ 本报告仅供参考，不构成任何投资建议。入市需谨慎，风险自负。</i>")
     return "\n".join(lines)
 
 def build_premarket_message(results, time_str):
     lines = [
-        f"<b>🌅 Pre-Market Early Warning</b>",
-        f"Before the market opens  ·  {time_str}",
+        f"<b>🌅 盘前预警报告</b>",
+        f"开盘前参考  ·  {time_str}",
         f"",
-        f"Here's what to watch before 9:30 AM:",
+        f"以下是今日开盘前需要关注的股票：",
     ]
 
     order = {"BUY STRONG": 0, "BUY": 1, "HOLD": 2, "SELL": 3, "SELL STRONG": 4}
@@ -520,11 +529,11 @@ def build_premarket_message(results, time_str):
            r["gap"]["gap_up"] or r["gap"]["gap_down"] or r["vol"]["surge"]]
     if hot:
         lines.append(f"")
-        lines.append(f"<b>⚡ Stocks to watch at open:</b> {', '.join(hot)}")
-        lines.append(f"These have the strongest signals before market opens.")
+        lines.append(f"<b>⚡ 开盘重点关注：</b> {', '.join(hot)}")
+        lines.append(f"以上股票在开盘前信号最强，请密切留意。")
 
     lines.append(f"")
-    lines.append(f"<i>⚠️ This is not financial advice. Always do your own research before trading.</i>")
+    lines.append(f"<i>⚠️ 本报告仅供参考，不构成任何投资建议。入市需谨慎，风险自负。</i>")
     return "\n".join(lines)
 
 # MAIN
@@ -542,9 +551,9 @@ def main():
 
     if not results:
         send_telegram(
-            "⚠️ Stock Alert Bot: No data retrieved this cycle.\n"
-            f"Tried {len(WATCHLIST)} tickers — all failed.\n"
-            f"Time: {time_str}\nCheck Actions log for details."
+            "⚠️ 股票信号机器人：本次周期未能获取任何数据。\n"
+            f"已尝试 {len(WATCHLIST)} 支股票 — 全部失败。\n"
+            f"时间：{time_str}\n请检查 Actions 日志了解详情。"
         )
         return
 
