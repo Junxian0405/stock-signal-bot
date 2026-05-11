@@ -1,0 +1,38 @@
+name: 专业盘前分析 Pre-Market Analyzer
+
+on:
+  schedule:
+    # 仅盘前三个时段触发 (UTC = ET + 4小时, EDT夏令时)
+    - cron: "0 8 * * 1-5"    # 04:00 ET — 早盘前深度扫描
+    - cron: "0 11 * * 1-5"   # 07:00 ET — 盘前中段扫描
+    - cron: "0 13 * * 1-5"   # 09:00 ET — 开盘前30分钟最终预警
+  workflow_dispatch:           # 支持手动触发
+
+jobs:
+  premarket-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pre-market analyzer
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY:   ${{ secrets.GEMINI_API_KEY }}
+          TAVILY_API_KEY:   ${{ secrets.TAVILY_API_KEY }}
+          STOCK_LIST:       ${{ secrets.STOCK_LIST }}
+        run: python src/premarket_analyzer.py
