@@ -30,7 +30,7 @@ TAVILY_API_KEY   = os.environ["TAVILY_API_KEY"]
 
 # 从环境变量读取自选股列表 (例如: "MU,SNDK,AAPL,TSLA")
 # 若未设置则使用默认股票池
-DEFAULT_STOCKS = "AAPL,MSFT,NVDA,TSLA,AMZN,GOOGL,META,AMD,INTC,SPY"
+DEFAULT_STOCKS = "MU,SNDK"
 STOCK_LIST_RAW = os.environ.get("STOCK_LIST", DEFAULT_STOCKS)
 WATCHLIST = [s.strip().upper() for s in STOCK_LIST_RAW.split(",") if s.strip()]
 
