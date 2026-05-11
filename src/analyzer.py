@@ -178,7 +178,7 @@ def get_signal(price, rsi, macd, macd_sig, ema9, ema21, ma50, ma200,
     elif boll["pct_b"] > 0.95: sell_v += 1
 
     # 7 OBV trend
-    if obv["obv_trend"] == "up":   buy_v  += 1
+    if obv["obv_trend"] == "up":     buy_v  += 1
     elif obv["obv_trend"] == "down": sell_v += 1
 
     # 8 OBV divergence (bonus)
@@ -308,10 +308,10 @@ def analyze(ticker, premarket=False):
 # SESSION
 def get_session(now_et):
     total = now_et.hour * 60 + now_et.minute
-    if 240 <= total < 570:   return "Pre-Market", True
-    elif 570 <= total < 960: return "Market Hours", False
-    elif 960 <= total < 1200:return "After-Hours", False
-    else:                    return "Off-Hours", False
+    if 240 <= total < 570:    return "Pre-Market", True
+    elif 570 <= total < 960:  return "Market Hours", False
+    elif 960 <= total < 1200: return "After-Hours", False
+    else:                     return "Off-Hours", False
 
 SESSION_EMOJI = {
     "Pre-Market":  "🌅",
@@ -436,12 +436,11 @@ def confidence_bar(signal: str, buy_count: int, sell_count: int) -> str:
 def count_votes(r: dict) -> tuple[int, int]:
     """Re-count buy/sell votes from alerts and signal for confidence bar."""
     sig = r["signal"]
-    # Estimate from signal strength
     if sig == "BUY STRONG":   return 8, 2
-    elif sig == "BUY":         return 6, 2
+    elif sig == "BUY":        return 6, 2
     elif sig == "SELL STRONG": return 2, 8
-    elif sig == "SELL":        return 2, 6
-    else:                      return 4, 4
+    elif sig == "SELL":       return 2, 6
+    else:                     return 4, 4
 
 # MESSAGE BUILDERS
 def build_stock_card(r: dict, show_gap: bool = False) -> str:
@@ -449,7 +448,6 @@ def build_stock_card(r: dict, show_gap: bool = False) -> str:
     lines = []
     buy_v, sell_v = count_votes(r)
 
-    # Header — ticker + price + big action
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"<b>{r['ticker']}</b>  —  <b>${r['price']}</b>")
     lines.append(f"")
@@ -458,12 +456,10 @@ def build_stock_card(r: dict, show_gap: bool = False) -> str:
     lines.append(confidence_bar(r["signal"], buy_v, sell_v))
     lines.append(f"")
 
-    # Plain-English reasons
     lines.append("<b>Why?</b>")
     for reason in plain_reason(r):
         lines.append(f"  {reason}")
 
-    # Quick reference numbers (collapsed, one line)
     lines.append(f"")
     lines.append(
         f"<i>RSI {r['rsi']} · MACD {r['macd']} · "
@@ -481,7 +477,6 @@ def build_standard_message(results, session, time_str):
         f"Here's what the market is telling us right now:",
     ]
 
-    # Sort: STRONG BUY first, then BUY, HOLD, SELL, STRONG SELL
     order = {"BUY STRONG": 0, "BUY": 1, "HOLD": 2, "SELL": 3, "SELL STRONG": 4}
     results_sorted = sorted(results, key=lambda r: order.get(r["signal"], 2))
 
@@ -490,7 +485,6 @@ def build_standard_message(results, session, time_str):
 
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
 
-    # Summary
     buys  = sum(1 for r in results if "BUY"  in r["signal"])
     sells = sum(1 for r in results if "SELL" in r["signal"])
     holds = sum(1 for r in results if r["signal"] == "HOLD")
@@ -512,7 +506,6 @@ def build_premarket_message(results, time_str):
         f"Here's what to watch before 9:30 AM:",
     ]
 
-    # Sort: biggest gap first, then by signal strength
     order = {"BUY STRONG": 0, "BUY": 1, "HOLD": 2, "SELL": 3, "SELL STRONG": 4}
     results_sorted = sorted(results,
         key=lambda r: (order.get(r["signal"], 2), -abs(r["gap"]["gap_pct"])))
@@ -522,7 +515,6 @@ def build_premarket_message(results, time_str):
 
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
 
-    # Hot list
     hot = [r["ticker"] for r in results if
            "BUY" in r["signal"] or "SELL" in r["signal"] or
            r["gap"]["gap_up"] or r["gap"]["gap_down"] or r["vol"]["surge"]]
@@ -548,13 +540,13 @@ def main():
         if data:
             results.append(data)
 
-        if not results:
-            send_telegram(
-                "⚠️ Stock Alert Bot: No data retrieved this cycle.\n"
-                f"Tried {len(WATCHLIST)} tickers — all failed.\n"
-                f"Time: {time_str}\nCheck Actions log for details."
-            )
-    return
+    if not results:
+        send_telegram(
+            "⚠️ Stock Alert Bot: No data retrieved this cycle.\n"
+            f"Tried {len(WATCHLIST)} tickers — all failed.\n"
+            f"Time: {time_str}\nCheck Actions log for details."
+        )
+        return
 
     if deep_pm:
         msg = build_premarket_message(results, time_str)
