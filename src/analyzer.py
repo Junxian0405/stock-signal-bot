@@ -6,8 +6,8 @@ Signals    : BUY · SELL · HOLD  (with squeeze / divergence / gap alerts)
 """
 
 import os
+import time
 import requests
-import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -16,6 +16,7 @@ import pytz
 # CONFIG
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+FINNHUB_API_KEY  = os.environ["FINNHUB_API_KEY"]
 
 WATCHLIST = [
     "MU", "SNDK"
@@ -249,15 +250,41 @@ SIGNAL_EMOJI = {
     "HOLD":       "🟡 HOLD",
 }
 
+# MARKET DATA (FINNHUB)
+def fetch_ohlcv(ticker: str, days: int = 180):
+    try:
+        to_ts   = int(time.time())
+        from_ts = to_ts - days * 86400
+        resp = requests.get(
+            "https://finnhub.io/api/v1/stock/candle",
+            params={"symbol": ticker, "resolution": "D",
+                    "from": from_ts, "to": to_ts, "token": FINNHUB_API_KEY},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("s") != "ok" or not data.get("c"):
+            print(f"[FINNHUB] {ticker}: no data — {data.get('s')}")
+            return None
+        df = pd.DataFrame({
+            "Open":   data["o"],
+            "High":   data["h"],
+            "Low":    data["l"],
+            "Close":  data["c"],
+            "Volume": data["v"],
+        }, index=pd.to_datetime(data["t"], unit="s"))
+        df.index.name = "Date"
+        return df
+    except Exception as e:
+        print(f"[FINNHUB ERROR] {ticker}: {e}")
+        return None
+
 # ANALYZE
 def analyze(ticker, premarket=False):
     try:
-        df = yf.download(ticker, period="6mo", interval="1d",
-                         progress=False, auto_adjust=True)
+        df = fetch_ohlcv(ticker)
         if df is None or len(df) < 30:
             return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
 
         close  = df["Close"].squeeze()
         high   = df["High"].squeeze()
