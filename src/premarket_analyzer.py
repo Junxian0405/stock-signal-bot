@@ -53,7 +53,7 @@ ET              = pytz.timezone("America/New_York")
 PREMARKET_HOURS = {4, 7, 9}
 
 AIHUBMIX_URL    = "https://aihubmix.com/v1/chat/completions"
-AIHUBMIX_MODEL  = "gemini-3-flash-preview-free"
+AIHUBMIX_MODEL  = "gpt-4.1-free"
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
 
