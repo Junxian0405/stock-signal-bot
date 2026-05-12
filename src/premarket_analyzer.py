@@ -592,10 +592,6 @@ def main():
     now_et   = datetime.now(ET)
     time_str = now_et.strftime("%Y-%m-%d %H:%M ET")
 
-    if now_et.hour not in PREMARKET_HOURS:
-        print(f"[SKIP] {time_str} 不在盘前时段。")
-        return
-
     print(f"[START] 盘前分析 — {time_str}")
     print(f"[INFO] 自选股池 ({len(WATCHLIST)} 支): {', '.join(WATCHLIST)}")
 
