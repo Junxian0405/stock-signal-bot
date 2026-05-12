@@ -408,9 +408,8 @@ def analyze(ticker: str) -> Optional[dict]:
 # ─── GEMINI AI ANALYSIS (精简版) ──────────────────────────────────────────────
 
 GEMINI_MODELS = [
-    "gemini-3.0-flash",
-    "gemini-2.5-flash-preview-05-20",
     "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
     "gemini-1.5-flash",
     "gemini-1.5-flash-8b",
 ]
@@ -477,6 +476,8 @@ EMA9/21: {tech['ema9']}/{tech['ema21']} | MA50/200: {tech['ma50']}/{tech['ma200'
             return result
         except Exception as e:
             print(f"[GEMINI ERROR] {tech['ticker']} model={model}: {e}")
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                time.sleep(5)
             continue
 
     return {
