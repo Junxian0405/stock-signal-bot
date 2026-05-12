@@ -3,9 +3,9 @@ name: Stock Signal Bot
 on:
   schedule:
     # Dedicated pre-market deep scans (EDT = UTC-4)
-    - cron: "0 8 * * 1-5"    # 04:00 ET — early pre-market
-    - cron: "0 11 * * 1-5"   # 07:00 ET — mid pre-market
-    - cron: "0 13 * * 1-5"   # 09:00 ET — final pre-market (30 min before open)
+    # - cron: "0 8 * * 1-5"    # 04:00 ET — early pre-market
+    # - cron: "0 11 * * 1-5"   # 07:00 ET — mid pre-market
+    # - cron: "0 13 * * 1-5"   # 09:00 ET — final pre-market (30 min before open)
     # Hourly market hours (09:30–16:00 ET)
     - cron: "30 13 * * 1-5"  # 09:30 ET — open bell
     - cron: "0 15 * * 1-5"   # 11:00 ET
