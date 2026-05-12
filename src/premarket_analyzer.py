@@ -457,11 +457,10 @@ EMA9/21: {tech['ema9']}/{tech['ema21']} | MA50/200: {tech['ma50']}/{tech['ma200'
                 "Authorization": f"Bearer {AIHUBMIX_API_KEY}",
                 "Content-Type": "application/json",
             },
-            json={
+            data=json.dumps({
                 "model": AIHUBMIX_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.3,
-            },
+            }),
             timeout=30,
         )
         resp.raise_for_status()
