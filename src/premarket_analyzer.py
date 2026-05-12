@@ -18,15 +18,13 @@ import numpy as np
 from datetime import datetime
 from typing import Optional
 import pytz
-from google import genai
-from google.genai import types
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
-TAVILY_API_KEY   = os.environ["TAVILY_API_KEY"]
+TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
+AIHUBMIX_API_KEY  = os.environ["AIHUBMIX_API_KEY"]
+TAVILY_API_KEY    = os.environ["TAVILY_API_KEY"]
 
 # 从环境变量读取自选股列表 (例如: "MU,SNDK,AAPL,TSLA")
 # 若未设置则使用默认股票池
@@ -54,7 +52,8 @@ COMPANY_NAMES = {
 ET              = pytz.timezone("America/New_York")
 PREMARKET_HOURS = {4, 7, 9}
 
-genai_client = genai.Client(api_key=GEMINI_API_KEY)
+AIHUBMIX_URL    = "https://aihubmix.com/v1/chat/completions"
+AIHUBMIX_MODEL  = "gemini-3-flash-preview-free"
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
 
@@ -407,13 +406,6 @@ def analyze(ticker: str) -> Optional[dict]:
 
 # ─── GEMINI AI ANALYSIS (精简版) ──────────────────────────────────────────────
 
-GEMINI_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
-]
-
 def gemini_analyze(tech: dict, news: list[dict], macro_news: list[dict]) -> dict:
     news_text = "\n".join([
         f"- [{n.get('date', '')}] {n['title'][:80]}: {n['content'][:120]}"
@@ -458,27 +450,30 @@ EMA9/21: {tech['ema9']}/{tech['ema21']} | MA50/200: {tech['ma50']}/{tech['ma200'
   "summary": "60字内综合点评"
 }}"""
 
-    for model in GEMINI_MODELS:
-        try:
-            response = genai_client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.3,
-                    response_mime_type="application/json",
-                ),
-            )
-            raw = response.text.strip()
-            raw = re.sub(r"```json|```", "", raw).strip()
-            result = json.loads(raw)
-            result["_model"] = model
-            print(f"[GEMINI OK] {tech['ticker']} — model: {model}")
-            return result
-        except Exception as e:
-            print(f"[GEMINI ERROR] {tech['ticker']} model={model}: {e}")
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                time.sleep(5)
-            continue
+    try:
+        resp = requests.post(
+            AIHUBMIX_URL,
+            headers={
+                "Authorization": f"Bearer {AIHUBMIX_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": AIHUBMIX_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        raw = re.sub(r"```json|```", "", raw).strip()
+        result = json.loads(raw)
+        result["_model"] = AIHUBMIX_MODEL
+        print(f"[AI OK] {tech['ticker']} — model: {AIHUBMIX_MODEL}")
+        return result
+    except Exception as e:
+        print(f"[AI ERROR] {tech['ticker']}: {e}")
 
     return {
         "open_low":       tech["price"] * 0.99,
