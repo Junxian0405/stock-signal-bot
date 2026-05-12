@@ -461,7 +461,6 @@ EMA9/21: {tech['ema9']}/{tech['ema21']} | MA50/200: {tech['ma50']}/{tech['ma200'
                 "model": AIHUBMIX_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "response_format": {"type": "json_object"},
             },
             timeout=30,
         )
