@@ -407,20 +407,26 @@ def analyze(ticker: str) -> Optional[dict]:
 
 # ─── GEMINI AI ANALYSIS (精简版) ──────────────────────────────────────────────
 
+GEMINI_MODELS = [
+    "gemini-3.0-flash",
+    "gemini-2.5-flash-preview-05-20",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+]
+
 def gemini_analyze(tech: dict, news: list[dict], macro_news: list[dict]) -> dict:
-    """精简版 Gemini 分析，控制 token 用量"""
-    try:
-        news_text = "\n".join([
-            f"- [{n.get('date', '')}] {n['title'][:80]}: {n['content'][:120]}"
-            for n in news[:5]
-        ]) or "无相关新闻"
+    news_text = "\n".join([
+        f"- [{n.get('date', '')}] {n['title'][:80]}: {n['content'][:120]}"
+        for n in news[:5]
+    ]) or "无相关新闻"
 
-        macro_text = "\n".join([
-            f"- {n['title'][:80]}"
-            for n in macro_news[:4]
-        ]) or "无宏观新闻"
+    macro_text = "\n".join([
+        f"- {n['title'][:80]}"
+        for n in macro_news[:4]
+    ]) or "无宏观新闻"
 
-        prompt = f"""你是华尔街资深分析师。基于以下数据，用简体中文做精简盘前分析。
+    prompt = f"""你是华尔街资深分析师。基于以下数据，用简体中文做精简盘前分析。
 
 【{tech['ticker']} ({tech['company']})】
 昨收 ${tech['price']} | 昨涨跌 {tech['chg1']:+.2f}% | 5日 {tech['chg5']:+.2f}%
@@ -453,34 +459,41 @@ EMA9/21: {tech['ema9']}/{tech['ema21']} | MA50/200: {tech['ma50']}/{tech['ma200'
   "summary": "60字内综合点评"
 }}"""
 
-        response = genai_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.3,
-                response_mime_type="application/json",
-            ),
-        )
-        raw = response.text.strip()
-        raw = re.sub(r"```json|```", "", raw).strip()
-        return json.loads(raw)
+    for model in GEMINI_MODELS:
+        try:
+            response = genai_client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    response_mime_type="application/json",
+                ),
+            )
+            raw = response.text.strip()
+            raw = re.sub(r"```json|```", "", raw).strip()
+            result = json.loads(raw)
+            result["_model"] = model
+            print(f"[GEMINI OK] {tech['ticker']} — model: {model}")
+            return result
+        except Exception as e:
+            print(f"[GEMINI ERROR] {tech['ticker']} model={model}: {e}")
+            continue
 
-    except Exception as e:
-        print(f"[GEMINI ERROR] {tech['ticker']}: {e}")
-        return {
-            "open_low":       tech["price"] * 0.99,
-            "open_high":      tech["price"] * 1.01,
-            "action":         "观望",
-            "reason":         "AI分析暂不可用",
-            "target_1w":      tech["price"],
-            "stop_loss":      round(tech["price"] * 0.95, 2),
-            "news_sentiment": "中性",
-            "news_impact":    "无法获取",
-            "catalyst":       "无法预测",
-            "risk_level":     "中",
-            "rating":         "持有",
-            "summary":        "AI暂不可用，请参考技术指标。",
-        }
+    return {
+        "open_low":       tech["price"] * 0.99,
+        "open_high":      tech["price"] * 1.01,
+        "action":         "观望",
+        "reason":         "AI分析暂不可用",
+        "target_1w":      tech["price"],
+        "stop_loss":      round(tech["price"] * 0.95, 2),
+        "news_sentiment": "中性",
+        "news_impact":    "无法获取",
+        "catalyst":       "无法预测",
+        "risk_level":     "中",
+        "rating":         "持有",
+        "summary":        "AI暂不可用，请参考技术指标。",
+        "_model":         "none",
+    }
 
 # ─── MESSAGE BUILDER (精简版) ────────────────────────────────────────────────
 
@@ -548,7 +561,8 @@ def build_stock_card(tech: dict, ai: dict) -> str:
         f"\n"
         f"📰 <b>新闻：</b>{ai['news_impact']}\n"
         f"🔮 <b>催化剂：</b>{ai['catalyst']}\n"
-        f"💬 <b>点评：</b>{ai['summary']}"
+        f"💬 <b>点评：</b>{ai['summary']}\n"
+        f"<i>🤖 {ai.get('_model', 'unknown')}</i>"
     )
 
 def build_premarket_report(results: list[dict], time_str: str) -> str:
