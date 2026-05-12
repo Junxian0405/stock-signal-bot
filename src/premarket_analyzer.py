@@ -460,10 +460,12 @@ EMA9/21: {tech['ema9']}/{tech['ema21']} | MA50/200: {tech['ma50']}/{tech['ma200'
             data=json.dumps({
                 "model": AIHUBMIX_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-            }),
+            }, ensure_ascii=False).encode("utf-8"),
             timeout=30,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            print(f"[AI ERROR] {tech['ticker']} HTTP {resp.status_code}: {resp.text}")
+            resp.raise_for_status()
         raw = resp.json()["choices"][0]["message"]["content"].strip()
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
