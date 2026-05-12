@@ -12,6 +12,7 @@ import re
 import json
 import time
 import requests
+import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -26,7 +27,6 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
 TAVILY_API_KEY   = os.environ["TAVILY_API_KEY"]
-FINNHUB_API_KEY  = os.environ["FINNHUB_API_KEY"]
 
 # 从环境变量读取自选股列表 (例如: "MU,SNDK,AAPL,TSLA")
 # 若未设置则使用默认股票池
@@ -320,35 +320,26 @@ def get_signal(price, rsi, macd, macd_sig, ema9, ema21, ma50, ma200,
     elif sell_v >= 5: return "SELL",        buy_v, sell_v, alerts
     else:             return "HOLD",        buy_v, sell_v, alerts
 
-# ─── MARKET DATA (FINNHUB) ────────────────────────────────────────────────────
+# ─── MARKET DATA ──────────────────────────────────────────────────────────────
 
-def fetch_ohlcv(ticker: str, days: int = 180) -> Optional[pd.DataFrame]:
-    try:
-        to_ts   = int(time.time())
-        from_ts = to_ts - days * 86400
-        resp = requests.get(
-            "https://finnhub.io/api/v1/stock/candle",
-            params={"symbol": ticker, "resolution": "D",
-                    "from": from_ts, "to": to_ts, "token": FINNHUB_API_KEY},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("s") != "ok" or not data.get("c"):
-            print(f"[FINNHUB] {ticker}: no data — {data.get('s')}")
-            return None
-        df = pd.DataFrame({
-            "Open":   data["o"],
-            "High":   data["h"],
-            "Low":    data["l"],
-            "Close":  data["c"],
-            "Volume": data["v"],
-        }, index=pd.to_datetime(data["t"], unit="s"))
-        df.index.name = "Date"
-        return df
-    except Exception as e:
-        print(f"[FINNHUB ERROR] {ticker}: {e}")
-        return None
+def fetch_ohlcv(ticker: str, retries: int = 3) -> Optional[pd.DataFrame]:
+    for attempt in range(retries):
+        try:
+            df = yf.download(ticker, period="6mo", interval="1d",
+                             progress=False, auto_adjust=True)
+            if df is None or len(df) < 30:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            return df
+        except Exception as e:
+            if attempt < retries - 1:
+                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s
+                print(f"[RETRY] {ticker} attempt {attempt + 1} failed: {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                print(f"[ERROR] {ticker}: {e}")
+                return None
 
 # ─── FULL STOCK ANALYSIS ──────────────────────────────────────────────────────
 
