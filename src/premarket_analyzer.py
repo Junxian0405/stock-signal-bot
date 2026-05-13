@@ -18,16 +18,24 @@ import numpy as np
 from datetime import datetime
 from typing import Optional
 import pytz
+from google import genai
+from google.genai import types
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 
-TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT_ID  = os.environ["TELEGRAM_CHAT_ID"]
-AIHUBMIX_API_KEY  = os.environ["AIHUBMIX_API_KEY"]
-TAVILY_API_KEY    = os.environ["TAVILY_API_KEY"]
+TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TAVILY_API_KEY   = os.environ["TAVILY_API_KEY"]
+
+# Support multiple comma-separated keys for quota rotation
+_raw_keys        = os.environ.get("GEMINI_API_KEYS", "")
+GEMINI_API_KEYS  = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+
+GEMINI_MODEL          = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
+GEMINI_MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.5-flash")
+GEMINI_REQUEST_DELAY  = float(os.environ.get("GEMINI_REQUEST_DELAY", "3.0"))
 
 # 从环境变量读取自选股列表 (例如: "MU,SNDK,AAPL,TSLA")
-# 若未设置则使用默认股票池
 DEFAULT_STOCKS = "AAPL,MSFT,NVDA,TSLA,AMZN,GOOGL,META,AMD,INTC,SPY"
 STOCK_LIST_RAW = os.environ.get("STOCK_LIST", DEFAULT_STOCKS)
 WATCHLIST = [s.strip().upper() for s in STOCK_LIST_RAW.split(",") if s.strip()]
@@ -51,9 +59,6 @@ COMPANY_NAMES = {
 
 ET              = pytz.timezone("America/New_York")
 PREMARKET_HOURS = {4, 7, 9}
-
-AIHUBMIX_URL    = "https://aihubmix.com/v1/chat/completions"
-AIHUBMIX_MODEL  = "gpt-4.1-free"
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
 
@@ -450,34 +455,30 @@ EMA9/21: {tech['ema9']}/{tech['ema21']} | MA50/200: {tech['ma50']}/{tech['ma200'
   "summary": "60字内综合点评"
 }}"""
 
-    try:
-        resp = requests.post(
-            AIHUBMIX_URL,
-            headers={
-                "Authorization": f"Bearer {AIHUBMIX_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            data=json.dumps({
-                "model": AIHUBMIX_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-            }, ensure_ascii=False).encode("utf-8"),
-            timeout=30,
-        )
-        if not resp.ok:
-            print(f"[AI ERROR] {tech['ticker']} HTTP {resp.status_code}: {resp.text}")
-            resp.raise_for_status()
-        body = resp.json()
-        print(f"[AI RAW] {tech['ticker']}: {json.dumps(body, ensure_ascii=False)[:300]}")
-        raw = (body["choices"][0]["message"]["content"] or "").strip()
-        if not raw:
-            raise ValueError("empty response from model")
-        raw = re.sub(r"```json|```", "", raw).strip()
-        result = json.loads(raw)
-        result["_model"] = AIHUBMIX_MODEL
-        print(f"[AI OK] {tech['ticker']} — model: {AIHUBMIX_MODEL}")
-        return result
-    except Exception as e:
-        print(f"[AI ERROR] {tech['ticker']}: {e}")
+    # Try each model, rotating through all keys per model before falling back
+    for model in [GEMINI_MODEL, GEMINI_MODEL_FALLBACK]:
+        for api_key in GEMINI_API_KEYS:
+            try:
+                client = genai.Client(api_key=api_key)
+                time.sleep(GEMINI_REQUEST_DELAY)
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.3,
+                        response_mime_type="application/json",
+                    ),
+                )
+                raw = response.text.strip()
+                raw = re.sub(r"```json|```", "", raw).strip()
+                result = json.loads(raw)
+                result["_model"] = model
+                print(f"[AI OK] {tech['ticker']} — model: {model}")
+                return result
+            except Exception as e:
+                print(f"[AI ERROR] {tech['ticker']} model={model} key=...{api_key[-6:]}: {e}")
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    time.sleep(5)
 
     return {
         "open_low":       tech["price"] * 0.99,
