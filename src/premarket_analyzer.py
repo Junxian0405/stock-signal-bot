@@ -466,7 +466,11 @@ EMA9/21: {tech['ema9']}/{tech['ema21']} | MA50/200: {tech['ma50']}/{tech['ma200'
         if not resp.ok:
             print(f"[AI ERROR] {tech['ticker']} HTTP {resp.status_code}: {resp.text}")
             resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
+        body = resp.json()
+        print(f"[AI RAW] {tech['ticker']}: {json.dumps(body, ensure_ascii=False)[:300]}")
+        raw = (body["choices"][0]["message"]["content"] or "").strip()
+        if not raw:
+            raise ValueError("empty response from model")
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
         result["_model"] = AIHUBMIX_MODEL
