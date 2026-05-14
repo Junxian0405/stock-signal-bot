@@ -26,6 +26,9 @@ from google.genai import types
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 TAVILY_API_KEY   = os.environ.get("TAVILY_API_KEY", "")
+FINNHUB_API_KEY  = os.environ.get("FINNHUB_API_KEY", "")
+
+FINNHUB_BASE = "https://finnhub.io/api/v1"
 
 _raw_keys       = os.environ.get("GEMINI_API_KEYS", "")
 GEMINI_API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
@@ -84,39 +87,119 @@ def send_telegram(message: str):
             print(f"[TELEGRAM ERROR] {e}")
         time.sleep(0.6)  # 避免 Telegram bot rate limit (~1 msg/sec to same chat)
 
-# ─── NEWS (TAVILY) ────────────────────────────────────────────────────────────
+# ─── FINNHUB （短线必备数据：财报/分析师/Insider/个股新闻）────────────────────
 
-def fetch_news(ticker: str, company: str) -> list[dict]:
-    """抓近3天股票相关新闻。"""
-    if not TAVILY_API_KEY:
-        return []
+def finnhub_get(endpoint: str, params: dict = None) -> Optional[dict]:
+    """Finnhub 统一请求封装。无 API key 时静默跳过。"""
+    if not FINNHUB_API_KEY:
+        return None
+    params = dict(params or {})
+    params["token"] = FINNHUB_API_KEY
     try:
-        resp = requests.post("https://api.tavily.com/search", json={
-            "api_key":      TAVILY_API_KEY,
-            "query":        f"{ticker} {company} stock news catalyst earnings",
-            "search_depth": "basic",
-            "max_results":  5,
-            "days":         3,
-            "include_domains": [
-                "reuters.com", "bloomberg.com", "cnbc.com", "wsj.com",
-                "marketwatch.com", "seekingalpha.com", "finance.yahoo.com",
-                "ft.com", "barrons.com",
-            ],
-        }, timeout=15)
+        resp = requests.get(f"{FINNHUB_BASE}{endpoint}", params=params, timeout=10)
         if resp.status_code != 200:
-            return []
-        return [
-            {"title":   i.get("title", ""),
-             "content": i.get("content", "")[:300],
-             "date":    i.get("published_date", "")[:10]}
-            for i in resp.json().get("results", [])
-        ]
+            print(f"[FINNHUB] {endpoint} HTTP {resp.status_code}: {resp.text[:100]}")
+            return None
+        return resp.json()
     except Exception as e:
-        print(f"[NEWS ERROR] {ticker}: {e}")
+        print(f"[FINNHUB ERROR] {endpoint}: {e}")
+        return None
+
+def fetch_news(ticker: str, company: str = "") -> list[dict]:
+    """近 3 天公司新闻（Finnhub）。比 Tavily 更精准，专门针对该 ticker。"""
+    from datetime import date, timedelta
+    today = date.today()
+    start = today - timedelta(days=3)
+    data = finnhub_get("/company-news", {
+        "symbol": ticker,
+        "from":   start.isoformat(),
+        "to":     today.isoformat(),
+    })
+    if not data:
         return []
+    # 按时间排序，最新优先
+    items = sorted(data, key=lambda x: x.get("datetime", 0), reverse=True)
+    return [
+        {
+            "title":   n.get("headline", "")[:120],
+            "content": n.get("summary", "")[:280],
+            "date":    datetime.fromtimestamp(n.get("datetime", 0)).strftime("%Y-%m-%d")
+                       if n.get("datetime") else "",
+            "source":  n.get("source", ""),
+        }
+        for n in items[:5]
+    ]
+
+def fetch_earnings_date(ticker: str) -> Optional[dict]:
+    """未来 14 天内的财报日期。对短线交易**至关重要**——
+    财报前一晚跳空是日内/周交易最大杀手。"""
+    from datetime import date, timedelta
+    today = date.today()
+    end = today + timedelta(days=14)
+    data = finnhub_get("/calendar/earnings", {
+        "from":   today.isoformat(),
+        "to":     end.isoformat(),
+        "symbol": ticker,
+    })
+    if not data:
+        return None
+    events = data.get("earningsCalendar") or []
+    if not events:
+        return None
+    events.sort(key=lambda x: x.get("date", ""))
+    e = events[0]
+    try:
+        e_date = datetime.strptime(e.get("date", ""), "%Y-%m-%d").date()
+        days_to = (e_date - today).days
+    except Exception:
+        return None
+    return {
+        "date":    e.get("date", ""),
+        "days_to": days_to,
+        "hour":    e.get("hour", ""),       # bmo (盘前) / amc (盘后)
+        "eps_est": e.get("epsEstimate"),
+        "rev_est": e.get("revenueEstimate"),
+    }
+
+def fetch_recommendations(ticker: str) -> Optional[dict]:
+    """近期分析师评级分布。"""
+    data = finnhub_get("/stock/recommendation", {"symbol": ticker})
+    if not data or len(data) == 0:
+        return None
+    latest = data[0]  # 最近一个月
+    return {
+        "strong_buy":  int(latest.get("strongBuy", 0)),
+        "buy":         int(latest.get("buy", 0)),
+        "hold":        int(latest.get("hold", 0)),
+        "sell":        int(latest.get("sell", 0)),
+        "strong_sell": int(latest.get("strongSell", 0)),
+        "period":      latest.get("period", ""),
+    }
+
+def fetch_insider(ticker: str) -> Optional[dict]:
+    """近 30 天 insider 交易（高管买卖）。
+    高管净买入是强力看涨信号；净卖出意义弱（多为预定计划）。"""
+    from datetime import date, timedelta
+    today = date.today()
+    start = today - timedelta(days=30)
+    data = finnhub_get("/stock/insider-transactions", {
+        "symbol": ticker,
+        "from":   start.isoformat(),
+    })
+    if not data or not data.get("data"):
+        return None
+    recent = data["data"][:20]
+    buy_shares  = sum(t.get("change", 0) for t in recent if t.get("change", 0) > 0)
+    sell_shares = sum(abs(t.get("change", 0)) for t in recent if t.get("change", 0) < 0)
+    return {
+        "buy_shares":  int(buy_shares),
+        "sell_shares": int(sell_shares),
+        "net":         int(buy_shares - sell_shares),
+        "count":       len(recent),
+    }
 
 def fetch_macro_news() -> list[dict]:
-    """抓宏观/政策新闻（FED、CPI、关税等）。"""
+    """抓宏观/政策新闻（FED、CPI、关税等） —— 共享，全 watchlist 只调用一次。"""
     if not TAVILY_API_KEY:
         return []
     try:
@@ -419,13 +502,47 @@ def gemini_analyze(tech: dict, news: list[dict], macro_news: list[dict]) -> dict
     ]) or "无相关新闻"
     macro_text = "\n".join([f"- {n['title'][:80]}" for n in macro_news[:4]]) or "无宏观新闻"
 
+    # ─── 基本面/事件 (Finnhub) ───
+    earn = tech.get("earnings")
+    if earn:
+        hour_zh = {"bmo": "盘前", "amc": "盘后", "dmh": "盘中"}.get(earn.get("hour", ""), "")
+        earnings_text = f"⚠️ {earn['days_to']} 天后 ({earn['date']} {hour_zh}) 公布财报"
+        if earn.get("eps_est") is not None:
+            earnings_text += f"，市场预期 EPS ${earn['eps_est']}"
+    else:
+        earnings_text = "未来 14 天无财报"
+
+    recs = tech.get("recs")
+    if recs:
+        recs_text = (f"评级分布 ({recs['period']}): "
+                     f"强烈买{recs['strong_buy']}/买{recs['buy']}/持{recs['hold']}/"
+                     f"卖{recs['sell']}/强卖{recs['strong_sell']}")
+    else:
+        recs_text = "无分析师评级数据"
+
+    ins = tech.get("insider")
+    if ins:
+        if ins["net"] > 0:
+            insider_text = f"高管净买入 +{ins['net']:,} 股（近30天，{ins['count']}笔）✅ 看涨"
+        elif ins["net"] < -10000:
+            insider_text = f"高管净卖出 {ins['net']:,} 股（近30天，{ins['count']}笔）"
+        else:
+            insider_text = f"高管交易平衡（近30天 {ins['count']}笔）"
+    else:
+        insider_text = "无 insider 数据"
+
     prompt = f"""你是资深短线交易员，专做日内交易和波段交易（持仓周期：日内 ~ 1周）。
-请基于下列数据，给出"短线交易"建议——综合考虑新闻催化和短期技术信号。
+请基于下列数据，给出"短线交易"建议——综合考虑新闻催化、基本面事件、技术信号。
 
 【{tech['ticker']} ({tech['company']})】
 现价 ${tech['price']} | 日涨跌 {tech['chg1']:+.2f}% | 5日涨跌 {tech['chg5']:+.2f}%
 近10日支撑/压力: ${tech['sr']['support']} / ${tech['sr']['resistance']}
 日线 ATR(14): ${tech['atr_d']['atr']} ({tech['atr_d']['atr_pct']}%) ← 用于止损参考
+
+⚠️ 基本面与事件（**短线优先级最高**）:
+- 财报: {earnings_text}
+- 分析师: {recs_text}
+- Insider: {insider_text}
 
 短线技术指标 (1h K线):
 - RSI(7): {tech['rsi']}
@@ -446,6 +563,9 @@ def gemini_analyze(tech: dict, news: list[dict], macro_news: list[dict]) -> dict
 
 宏观/政策新闻:
 {macro_text}
+
+⚡ **关键规则**：如果 3 天内有财报，必须建议"日内"或"观望"——不要建议持仓过财报夜（跳空风险极高）。
+如果高管近期有显著净买入，提升 1-2 分评分。
 
 【任务】综合"新闻催化 × 技术信号"，给出短线交易建议。
 评分标准 (score 1-10)：
@@ -564,12 +684,56 @@ def score_bar(score: int) -> str:
     else:        emoji = "🟨"
     return emoji * s + "⬜" * (10 - s) + f"  <b>{s}/10</b>"
 
+def _earnings_line(tech: dict) -> str:
+    """财报提示行：3 天内显眼警告 / 7 天内黄色提示 / 14 天内简短信息。"""
+    e = tech.get("earnings")
+    if not e:
+        return ""
+    days = e.get("days_to", 99)
+    hour_zh = {"bmo": "盘前", "amc": "盘后", "dmh": "盘中"}.get(e.get("hour", ""), "")
+    if days <= 3:
+        prefix = "🚨🚨"
+        suffix = " — <b>不建议持仓过夜！</b>"
+    elif days <= 7:
+        prefix = "⚠️"
+        suffix = " — 注意跳空风险"
+    else:
+        prefix = "📅"
+        suffix = ""
+    return f"{prefix} <b>财报 {e['date']} {hour_zh}（{days} 天后）</b>{suffix}\n"
+
+def _recs_line(tech: dict) -> str:
+    r = tech.get("recs")
+    if not r:
+        return ""
+    bullish = r["strong_buy"] + r["buy"]
+    bearish = r["sell"] + r["strong_sell"]
+    total = bullish + r["hold"] + bearish
+    if total == 0:
+        return ""
+    return (f"🏛 <b>分析师</b> 买{bullish} · 持{r['hold']} · 卖{bearish}"
+            f" <i>({r['period']})</i>\n")
+
+def _insider_line(tech: dict) -> str:
+    i = tech.get("insider")
+    if not i or i["count"] == 0:
+        return ""
+    if i["net"] > 0:
+        return f"🧑‍💼 <b>高管净买入</b> +{i['net']:,} 股（30天，看涨）✅\n"
+    elif i["net"] < -10000:
+        return f"🧑‍💼 高管净卖出 {i['net']:,} 股（30天）\n"
+    return ""
+
 def build_stock_card(tech: dict, ai: dict) -> str:
     score   = int(ai.get("score", 5))
     act_e   = ACTION_EMOJI.get(ai["action"], "🟡")
     risk_e  = RISK_EMOJI.get(ai["risk_level"], "🟡")
     conf_e  = CONF_EMOJI.get(ai["confidence"], "✋")
     chg_arrow = "📈" if tech["chg1"] >= 0 else "📉"
+
+    # 基本面 / 事件块（如果没数据就空）
+    fundamentals = _earnings_line(tech) + _recs_line(tech) + _insider_line(tech)
+    fundamentals_block = f"\n{fundamentals}" if fundamentals else ""
 
     return (
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -583,6 +747,7 @@ def build_stock_card(tech: dict, ai: dict) -> str:
         f"🎯 <b>入场区间</b> ${ai['entry_low']:.2f} ~ ${ai['entry_high']:.2f}\n"
         f"📍 目标1 <b>${ai['target_1']}</b> ｜ 目标2 <b>${ai['target_2']}</b>\n"
         f"🛑 止损 <b>${ai['stop_loss']}</b>\n"
+        f"{fundamentals_block}"
         f"\n"
         f"📊 <b>技术面</b>  买 {tech['buy_score']}/10 ｜ 卖 {tech['sell_score']}/10\n"
         f"   <i>RSI(7) {tech['rsi']} · MACD {tech['macd']['hist']:+.3f} · BB%B {tech['boll']['pct_b']}</i>\n"
@@ -638,6 +803,15 @@ def build_summary(results: list[dict]) -> str:
         names = ", ".join([f"{r['tech']['ticker']}({r['ai']['score']})" for r in top])
         lines.append(f"⭐ <b>重点关注：</b>{names}")
 
+    # 财报周内警告（短线最重要的风险提醒）
+    earnings_this_week = []
+    for r in results:
+        e = r["tech"].get("earnings")
+        if e and e.get("days_to", 99) <= 7:
+            earnings_this_week.append(f"{r['tech']['ticker']}({e['days_to']}天)")
+    if earnings_this_week:
+        lines.append(f"🚨 <b>本周财报：</b>{', '.join(earnings_this_week)} — 严控隔夜持仓")
+
     risky = [r["tech"]["ticker"] for r in results if r["ai"].get("risk_level") == "高"]
     if risky:
         lines.append(f"⚠️ <b>高风险：</b>{', '.join(risky)}")
@@ -673,8 +847,23 @@ def main():
             print(f"       [SKIP] 数据不足")
             continue
         company = COMPANY_NAMES.get(ticker, ticker)
-        news = fetch_news(ticker, company)
-        print(f"       新闻 {len(news)} 条 ｜ 技术买{tech['buy_score']}/卖{tech['sell_score']}")
+
+        # ─── Finnhub 数据集（短线必备）───
+        news      = fetch_news(ticker, company)
+        earnings  = fetch_earnings_date(ticker)
+        recs      = fetch_recommendations(ticker)
+        insider   = fetch_insider(ticker)
+
+        # 把基本面数据塞进 tech，方便后续使用
+        tech["earnings"] = earnings
+        tech["recs"]     = recs
+        tech["insider"]  = insider
+
+        ern_info = ""
+        if earnings:
+            ern_info = f" ｜ 📅 财报 {earnings['date']}（{earnings['days_to']}天后）"
+        print(f"       新闻{len(news)}条 ｜ 技术买{tech['buy_score']}/卖{tech['sell_score']}{ern_info}")
+
         ai = gemini_analyze(tech, news, macro_news)
         results.append({"tech": tech, "ai": ai})
         time.sleep(1)

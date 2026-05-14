@@ -4,9 +4,10 @@
 专为**日内交易 ~ 波段交易**（持仓周期：日内 ~ 1周）设计，每天在 6 个**黄金时段**自动推送 **Telegram 信号**，结合**短线优化的技术指标 + 实时新闻 + Google Gemini AI** 综合分析，给出 **1-10 分**买卖评分。
 
 **市场：** NASDAQ / NYSE
-**数据：** Yahoo Finance via yfinance（盘中约 15 分钟延迟）
-**新闻：** Tavily API（近 3 天个股新闻 + 美国宏观/政策）
-**AI：** Google Gemini 2.5 Flash（自动 fallback 到 2.0 Flash）
+**K线数据：** Yahoo Finance via yfinance（1h × 60天 + 日线 × 3月，约 15 min 延迟）
+**基本面/事件：** Finnhub 免费层（📅 财报日历 · 🏛 分析师评级 · 🧑‍💼 Insider Trading · 📰 个股新闻）
+**宏观新闻：** Tavily API（FED / CPI / 关税）
+**AI：** Google Gemini 2.5 Flash（4 层 cascade 自动 fallback）
 **语言：** Python 3.11
 
 ---
@@ -16,12 +17,27 @@
 每只股票分析流程：
 
 ```
-1h K线 (60天)      ─┐
-日线 (3月)         ─┤── 短线技术指标 ── 买/卖 各 0-10 分
-                    │
-Tavily 新闻         ─┤
-宏观/政策新闻       ─┴── Gemini AI ── 综合评分 1-10 + 执行建议
+1h K线 (60天) yfinance      ─┐
+日线 (3月)    yfinance      ─┤
+                              ├── 短线技术指标 ── 买/卖 各 0-10 分
+📅 财报日历     Finnhub      ─┤
+🏛 分析师评级   Finnhub      ─┤
+🧑‍💼 Insider 交易 Finnhub      ─┤
+📰 个股新闻     Finnhub      ─┤
+🌐 宏观新闻     Tavily       ─┴── Gemini AI ── 综合评分 1-10 + 执行建议
 ```
+
+### 📅 财报日历 —— 短线最重要的防风险机制
+
+短线交易的头号杀手是**财报隔夜跳空**：你以为持仓 3 天，结果第 2 天财报后跳空 -15%。
+本 bot 自动检测未来 14 天财报：
+
+| 距离财报 | 标记 | bot 行为 |
+|---------|------|---------|
+| ≤3 天 | 🚨🚨 | Gemini 强制建议"日内"或"观望"，不持仓过夜 |
+| ≤7 天 | ⚠️ | 卡片显眼警告 + 汇总置顶 |
+| ≤14 天 | 📅 | 简短提示 |
+| >14 天 | 不显示 | 无影响 |
 
 ### 📐 1-10 评分对应建议
 
@@ -108,7 +124,8 @@ Tavily 新闻         ─┤
 |------|------|---------|
 | **Telegram** | 接收推送 | @BotFather |
 | **Google Gemini** | AI 综合分析 | https://aistudio.google.com/apikey（免费配额充足） |
-| **Tavily** | 新闻搜索 | https://tavily.com（每月 1000 次免费） |
+| **Finnhub** | 财报/分析师/Insider/个股新闻 | https://finnhub.io/register（**60 次/分钟免费**，注册即用） |
+| **Tavily** | 宏观/政策新闻 | https://tavily.com（每月 1000 次免费，只用于宏观） |
 
 > 💡 **Gemini 多 key 轮换**：建议申请 2-3 个 Gemini key 用逗号分隔，自动规避配额限制
 
@@ -131,7 +148,8 @@ stock-signal-bot/
 | `TELEGRAM_TOKEN` | ✅ | Telegram Bot Token |
 | `TELEGRAM_CHAT_ID` | ✅ | Telegram Chat ID |
 | `GEMINI_API_KEYS` | ✅ | 一个或多个 Gemini key，逗号分隔 |
-| `TAVILY_API_KEY` | ✅ | Tavily API Key |
+| `FINNHUB_API_KEY` | ✅ | Finnhub API Key（财报/分析师/Insider 必需） |
+| `TAVILY_API_KEY` | 可选 | Tavily API Key（仅宏观新闻，不填则跳过宏观） |
 | `STOCK_LIST` | 可选 | 自选股，逗号分隔（如 `MU,SNDK,NVDA,AMD`），不设则用默认 |
 
 可选 Repository Variables（**Settings → Variables**）：
@@ -165,6 +183,10 @@ NVDA NVIDIA ｜ $895.40 📈 +2.34%
 🎯 入场区间 $890.00 ~ $898.00
 📍 目标1 $920 ｜ 目标2 $950
 🛑 止损 $872
+
+⚠️ 财报 2026-05-22 amc（7 天后）— 注意跳空风险
+🏛 分析师 买 31 · 持 3 · 卖 0  (2026-05)
+🧑‍💼 高管净买入 +125,000 股（30天，看涨）✅
 
 📊 技术面  买 8/10 ｜ 卖 1/10
    RSI(7) 64 · MACD +0.420 · BB%B 0.92
