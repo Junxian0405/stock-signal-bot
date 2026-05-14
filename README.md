@@ -7,7 +7,7 @@
 **K线数据：** Yahoo Finance via yfinance（1h × 60天 + 日线 × 3月，约 15 min 延迟）
 **基本面/事件：** Finnhub 免费层（📅 财报日历 · 🏛 分析师评级 · 🧑‍💼 Insider Trading · 📰 个股新闻）
 **宏观新闻：** Tavily API（FED / CPI / 关税）
-**AI：** Google Gemini 2.5 Flash（4 层 cascade 自动 fallback）
+**AI：** Google Gemini 3 Flash Preview（首选）+ 4 层 cascade 自动 fallback
 **语言：** Python 3.11
 
 ---
@@ -221,13 +221,19 @@ A：Yahoo Finance 免费数据约 15 分钟延迟。对于"日内 ~ 1 周"持仓
 A：建议 ≤15 只。每只约 8-10 秒（数据 + 新闻 + AI），超过 15 只可能撞 GitHub Actions 的 15 分钟 timeout。也要注意 Tavily/Gemini 的免费额度。每只股票推送**独立 Telegram 消息**（不再拼成一长条），所以加多少都不会被截断。
 
 **Q：免费 API 额度够用吗？**
-A：本 bot 内置 **4 层 Gemini 模型 cascade**，遇 503/429 自动切换：
-1. `gemini-2.5-flash` —— 10 RPM / 250 RPD（质量最高）
-2. `gemini-2.0-flash` —— 15 RPM / 1500 RPD
-3. `gemini-2.0-flash-lite` —— **30 RPM / 1500 RPD（最慷慨兜底）**
-4. `gemini-2.5-flash-lite` —— 15 RPM / 1000 RPD
+A：本 bot 内置 **5 层 Gemini 模型 cascade**（全部为当前活跃的免费层模型，已剔除 deprecated 的 2.0 系列），遇 503/429 自动按顺序降级：
 
-单 key 跑 15 只股票 × 6 次/天 = 90 次/天，**单个 2.5-flash 就够用**。建议申请 2-3 个 key 用逗号填 `GEMINI_API_KEYS`，bot 会自动轮换。
+| 顺序 | 模型 | 状态 | 角色 |
+|------|------|------|------|
+| 1 | `gemini-3-flash-preview` | Preview | ⭐ **首选**（质量最高） |
+| 2 | `gemini-3.1-flash-lite` | Stable | Gemini 3 家族稳定兜底 |
+| 3 | `gemini-2.5-flash` | Stable | 成熟推理，JSON 输出稳定 |
+| 4 | `gemini-2.5-flash-lite` | Stable | 免费配额最慷慨 |
+| 5 | `gemini-3.1-flash-lite-preview` | Preview | Preview 期配额限制更宽松 |
+
+单 key 跑 15 只股票 × 6 次/天 = 90 次/天，**单个 3-flash-preview 就够用**。建议申请 2-3 个 key 用逗号填 `GEMINI_API_KEYS`，bot 会自动轮换。
+
+> 💡 想动态调整不必改代码：在 GitHub 仓库 **Settings → Variables** 设置 `GEMINI_MODEL` / `GEMINI_MODEL_FALLBACK` 即可覆盖默认值。
 
 - **Tavily 免费版**：每月 1000 次 → 15 只 × 2 次/触发 × 6 次/天 × 22 工作日 ≈ 3960 次，**不够，建议升级或减少股票数到 ≤4 只**
 

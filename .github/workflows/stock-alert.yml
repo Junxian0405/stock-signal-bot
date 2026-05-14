@@ -38,8 +38,8 @@ jobs:
           TAVILY_API_KEY:        ${{ secrets.TAVILY_API_KEY }}
           FINNHUB_API_KEY:       ${{ secrets.FINNHUB_API_KEY }}
           GEMINI_API_KEYS:       ${{ secrets.GEMINI_API_KEYS }}
-          GEMINI_MODEL:          ${{ vars.GEMINI_MODEL          || 'gemini-2.5-flash' }}
-          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || 'gemini-2.0-flash' }}
+          GEMINI_MODEL:          ${{ vars.GEMINI_MODEL          || 'gemini-3-flash-preview' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || 'gemini-3.1-flash-lite' }}
           GEMINI_REQUEST_DELAY:  '2.0'
           STOCK_LIST:            ${{ secrets.STOCK_LIST }}
         run: python src/analyzer.py

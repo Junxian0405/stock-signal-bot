@@ -33,13 +33,18 @@ FINNHUB_BASE = "https://finnhub.io/api/v1"
 _raw_keys       = os.environ.get("GEMINI_API_KEYS", "")
 GEMINI_API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
 
-GEMINI_MODEL          = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-GEMINI_MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash")
+GEMINI_MODEL          = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
+GEMINI_MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-3.1-flash-lite")
 GEMINI_REQUEST_DELAY  = float(os.environ.get("GEMINI_REQUEST_DELAY", "2.0"))
 
-# 模型 cascade：按配额从严到宽排序，免费层最后兜底
-# (gemini-2.0-flash-lite: 30 RPM / 1500 RPD，最慷慨的免费配额)
-_extra_fallbacks = ["gemini-2.0-flash-lite", "gemini-2.5-flash-lite"]
+# 5 层 cascade：质量从高到低，免费配额从严到宽
+# 全部为当前活跃的免费层模型（已剔除 deprecated 的 2.0 系列）
+# 顺序：3-flash-preview → 3.1-flash-lite (Stable) → 2.5-flash → 2.5-flash-lite → 3.1-flash-lite-preview
+_extra_fallbacks = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.1-flash-lite-preview",
+]
 MODEL_CASCADE = []
 _seen = set()
 for _m in [GEMINI_MODEL, GEMINI_MODEL_FALLBACK, *_extra_fallbacks]:
