@@ -34,6 +34,16 @@ GEMINI_MODEL          = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash")
 GEMINI_REQUEST_DELAY  = float(os.environ.get("GEMINI_REQUEST_DELAY", "2.0"))
 
+# 模型 cascade：按配额从严到宽排序，免费层最后兜底
+# (gemini-2.0-flash-lite: 30 RPM / 1500 RPD，最慷慨的免费配额)
+_extra_fallbacks = ["gemini-2.0-flash-lite", "gemini-2.5-flash-lite"]
+MODEL_CASCADE = []
+_seen = set()
+for _m in [GEMINI_MODEL, GEMINI_MODEL_FALLBACK, *_extra_fallbacks]:
+    if _m and _m not in _seen:
+        MODEL_CASCADE.append(_m)
+        _seen.add(_m)
+
 DEFAULT_STOCKS = "MU,SNDK"
 STOCK_LIST_RAW = os.environ.get("STOCK_LIST", DEFAULT_STOCKS)
 WATCHLIST      = [s.strip().upper() for s in STOCK_LIST_RAW.split(",") if s.strip()]
@@ -59,15 +69,20 @@ ET = pytz.timezone("America/New_York")
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
 
 def send_telegram(message: str):
-    """自动分段，避免 Telegram 4096 字上限。"""
+    """发送单条消息。超长（>3800 字）时自动分段，但通常用于单只股票卡片，长度可控。"""
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     max_len = 3800
-    chunks  = [message[i:i + max_len] for i in range(0, len(message), max_len)]
+    chunks  = [message[i:i + max_len] for i in range(0, len(message), max_len)] or [""]
     for chunk in chunks:
+        if not chunk:
+            continue
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}
-        resp = requests.post(url, json=payload, timeout=15)
-        resp.raise_for_status()
-        time.sleep(0.5)
+        try:
+            resp = requests.post(url, json=payload, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"[TELEGRAM ERROR] {e}")
+        time.sleep(0.6)  # 避免 Telegram bot rate limit (~1 msg/sec to same chat)
 
 # ─── NEWS (TAVILY) ────────────────────────────────────────────────────────────
 
@@ -460,30 +475,55 @@ def gemini_analyze(tech: dict, news: list[dict], macro_news: list[dict]) -> dict
   "summary":    "60字内：具体执行建议（什么价位买/卖、持有多久、止损位）"
 }}"""
 
-    for model in [GEMINI_MODEL, GEMINI_MODEL_FALLBACK]:
+    # ─── 重试策略 ───
+    # 三层 cascade × N 个 key × 最多 3 次（指数退避用于 503/500/UNAVAILABLE）
+    # 429 (配额耗尽)：立即跳到下一个 (key,model) 组合，不浪费时间
+    # 503/500/UNAVAILABLE：等 3s/6s/12s 后重试同 (key,model)（服务端临时故障）
+    last_err = "unknown"
+    for model in MODEL_CASCADE:
         for api_key in GEMINI_API_KEYS:
-            try:
-                client = genai.Client(api_key=api_key)
-                time.sleep(GEMINI_REQUEST_DELAY)
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.3,
-                        response_mime_type="application/json",
-                    ),
-                )
-                raw = re.sub(r"```json|```", "", response.text.strip()).strip()
-                result = json.loads(raw)
-                result["_model"] = model
-                print(f"[AI OK] {tech['ticker']} — {model} → {result.get('action')} ({result.get('score')}/10)")
-                return result
-            except Exception as e:
-                print(f"[AI ERROR] {tech['ticker']} {model} ...{api_key[-6:]}: {e}")
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    time.sleep(5)
+            for attempt in range(3):
+                try:
+                    client = genai.Client(api_key=api_key)
+                    if attempt == 0:
+                        time.sleep(GEMINI_REQUEST_DELAY)
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=0.3,
+                            response_mime_type="application/json",
+                        ),
+                    )
+                    raw = re.sub(r"```json|```", "", response.text.strip()).strip()
+                    result = json.loads(raw)
+                    result["_model"] = model
+                    print(f"[AI OK] {tech['ticker']} — {model} → "
+                          f"{result.get('action')} ({result.get('score')}/10)")
+                    return result
+                except Exception as e:
+                    err = str(e)
+                    last_err = err
+                    err_short = err[:120].replace("\n", " ")
+                    print(f"[AI try{attempt+1}/3] {tech['ticker']} {model} "
+                          f"...{api_key[-6:]}: {err_short}")
 
-    # ─── Fallback：纯技术评分推导 ───
+                    if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                        # 此 (model,key) 已超配额，立即跳过
+                        break
+                    if any(code in err for code in ("503", "500", "UNAVAILABLE", "INTERNAL")):
+                        # 临时故障：退避后重试同 key/model
+                        if attempt < 2:
+                            wait = 3 * (2 ** attempt)  # 3s, 6s
+                            print(f"           ↳ 服务端临时故障，{wait}s 后重试...")
+                            time.sleep(wait)
+                            continue
+                        break
+                    # 其他错误（解析失败、auth 等）—— 不重试
+                    break
+
+    # ─── 全部模型/key 都失败 → 纯技术评分推导 ───
+    print(f"[AI FALLBACK] {tech['ticker']} 全部模型失败，启用技术面 fallback。最后错误：{last_err[:80]}")
     net = tech["buy_score"] - tech["sell_score"]
     score = max(1, min(10, 5 + net // 2))
     if score >= 8:   action = "强烈买入"
@@ -566,25 +606,19 @@ def get_session(now_et: datetime) -> str:
     elif 960 <= total < 1200: return "After-Hours"
     else:                     return "Off-Hours"
 
-def build_report(results: list[dict], time_str: str, session: str) -> str:
+def build_header(time_str: str, session: str, n: int) -> str:
+    """开头消息：时段 + 标题。"""
     sess_e  = SESSION_EMOJI.get(session, "")
     sess_zh = SESSION_NAME_ZH.get(session, session)
+    return (
+        f"<b>📊 短线交易信号报告</b>\n"
+        f"{sess_e} <b>{sess_zh}</b> ｜ 📅 {time_str}\n"
+        f"<i>1h技术指标 + 实时新闻 + Gemini AI 综合评分 (1-10)</i>\n"
+        f"📦 共 {n} 支股票，按评分高→低推送"
+    )
 
-    lines = [
-        "<b>📊 短线交易信号报告</b>",
-        f"{sess_e} <b>{sess_zh}</b> ｜ 📅 {time_str}",
-        "<i>1h技术指标 + 实时新闻 + Gemini AI 综合评分 (1-10)</i>",
-        "",
-    ]
-
-    results.sort(key=lambda r: -int(r["ai"].get("score", 5)))
-    for r in results:
-        lines.append(build_stock_card(r["tech"], r["ai"]))
-        lines.append("")
-
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append("")
-
+def build_summary(results: list[dict]) -> str:
+    """结尾消息：汇总统计 + 重点 + 免责。"""
     scores      = [int(r["ai"].get("score", 5)) for r in results]
     strong_buy  = sum(1 for s in scores if s >= 8)
     buy         = sum(1 for s in scores if 6 <= s < 8)
@@ -592,11 +626,12 @@ def build_report(results: list[dict], time_str: str, session: str) -> str:
     sell        = sum(1 for s in scores if 2 < s <= 4)
     strong_sell = sum(1 for s in scores if s <= 2)
 
-    lines.append("<b>📋 汇总</b>")
-    lines.append(
+    lines = [
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "<b>📋 本轮汇总</b>",
         f"🚀🚀 强烈买入 {strong_buy} ｜ 🟢 买入 {buy} ｜ "
-        f"🟡 观望 {hold} ｜ 🔴 卖出 {sell} ｜ ❌❌ 强烈卖出 {strong_sell}"
-    )
+        f"🟡 观望 {hold} ｜ 🔴 卖出 {sell} ｜ ❌❌ 强烈卖出 {strong_sell}",
+    ]
 
     top = [r for r in results if int(r["ai"].get("score", 5)) >= 7]
     if top:
@@ -606,6 +641,11 @@ def build_report(results: list[dict], time_str: str, session: str) -> str:
     risky = [r["tech"]["ticker"] for r in results if r["ai"].get("risk_level") == "高"]
     if risky:
         lines.append(f"⚠️ <b>高风险：</b>{', '.join(risky)}")
+
+    fallback = [r["tech"]["ticker"] for r in results
+                if r["ai"].get("_model") == "fallback"]
+    if fallback:
+        lines.append(f"🤖 <b>仅技术面（AI 不可用）：</b>{', '.join(fallback)}")
 
     lines.append("")
     lines.append("<i>⚠️ AI 辅助生成，仅供短线交易参考，不构成投资建议。请严格执行止损。</i>")
@@ -647,9 +687,20 @@ def main():
         )
         return
 
-    report = build_report(results, time_str, session)
-    send_telegram(report)
-    print(f"[OK] 报告已发送，共 {len(results)} 支股票")
+    # 按评分排序，高分先推
+    results.sort(key=lambda r: -int(r["ai"].get("score", 5)))
+
+    # 1) 开头消息
+    send_telegram(build_header(time_str, session, len(results)))
+
+    # 2) 每只股票一条独立消息（避免单条消息过长）
+    for r in results:
+        send_telegram(build_stock_card(r["tech"], r["ai"]))
+
+    # 3) 结尾汇总
+    send_telegram(build_summary(results))
+
+    print(f"[OK] 报告已发送：1 header + {len(results)} 卡片 + 1 汇总")
 
 if __name__ == "__main__":
     main()
