@@ -1,587 +1,655 @@
 """
-Stock Signal Analyzer — US Market (NASDAQ/NYSE)
-Indicators : RSI · MACD · EMA9/21 · MA50/200 · Bollinger Bands · OBV · Volume Surge · ATR · VWAP · Stochastic · Gap%
-Modes      : Hourly standard scan  |  Pre-market deep scan (04:00 / 07:00 / 09:00 ET)
-Signals    : BUY · SELL · HOLD  (with squeeze / divergence / gap alerts)
+Short-Term Trading Analyzer — Day / Swing Trading (持仓周期：日内 ~ 1周)
+
+数据：1h K线 (60天) + 日线 (3月) 作为支撑/压力/缺口上下文
+指标：短线优化（RSI(7) · MACD(5/13/5) · EMA9/21 · VWAP · BB(20) · Vol Surge ·
+       Stoch(9,3) · ATR · Gap · 5-bar Momentum · 10-day S/R）
+评分：技术买/卖 各 0-10 + Gemini AI 综合评分 1-10（结合新闻与指标）
+新闻：Tavily 抓近3天股票相关 + 美国宏观/政策
 """
 
 import os
+import re
+import json
 import time
 import requests
 import yfinance as yf
 import pandas as pd
-import numpy as np
 from datetime import datetime
+from typing import Optional
 import pytz
+from google import genai
+from google.genai import types
 
-# CONFIG
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
+
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+TAVILY_API_KEY   = os.environ.get("TAVILY_API_KEY", "")
 
-WATCHLIST = [
-    "MU", "SNDK"
-]
+_raw_keys       = os.environ.get("GEMINI_API_KEYS", "")
+GEMINI_API_KEYS = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+
+GEMINI_MODEL          = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL_FALLBACK = os.environ.get("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash")
+GEMINI_REQUEST_DELAY  = float(os.environ.get("GEMINI_REQUEST_DELAY", "2.0"))
+
+DEFAULT_STOCKS = "MU,SNDK"
+STOCK_LIST_RAW = os.environ.get("STOCK_LIST", DEFAULT_STOCKS)
+WATCHLIST      = [s.strip().upper() for s in STOCK_LIST_RAW.split(",") if s.strip()]
+
+COMPANY_NAMES = {
+    "AAPL":  "Apple",      "MSFT": "Microsoft",   "NVDA": "NVIDIA",
+    "TSLA":  "Tesla",      "AMZN": "Amazon",      "GOOGL": "Alphabet",
+    "META":  "Meta",       "AMD":  "AMD",         "INTC": "Intel",
+    "SPY":   "S&P 500 ETF","MU":   "Micron",      "SNDK": "SanDisk",
+    "QQQ":   "纳指 ETF",   "ARM":  "Arm Holdings","PLTR": "Palantir",
+    "SOFI":  "SoFi",       "SMCI": "Super Micro", "AVGO": "Broadcom",
+    "ASML":  "ASML",       "TSM":  "台积电",      "BABA": "阿里巴巴",
+    "NFLX":  "Netflix",    "DIS":  "Disney",      "BA":   "波音",
+    "JPM":   "摩根大通",   "GS":   "高盛",        "C":    "花旗",
+    "COIN":  "Coinbase",   "MSTR": "MicroStrategy","RBLX": "Roblox",
+    "UBER":  "Uber",       "LYFT": "Lyft",        "PYPL": "PayPal",
+    "SHOP":  "Shopify",    "SQ":   "Block",       "CRM":  "Salesforce",
+    "ORCL":  "甲骨文",     "ADBE": "Adobe",       "NOW":  "ServiceNow",
+}
 
 ET = pytz.timezone("America/New_York")
-PREMARKET_HOURS = {4, 7, 9}
 
-# TELEGRAM
+# ─── TELEGRAM ─────────────────────────────────────────────────────────────────
+
 def send_telegram(message: str):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
-    resp = requests.post(url, json=payload, timeout=10)
-    resp.raise_for_status()
+    """自动分段，避免 Telegram 4096 字上限。"""
+    url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    max_len = 3800
+    chunks  = [message[i:i + max_len] for i in range(0, len(message), max_len)]
+    for chunk in chunks:
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML"}
+        resp = requests.post(url, json=payload, timeout=15)
+        resp.raise_for_status()
+        time.sleep(0.5)
 
-# INDICATORS
-def compute_rsi(close, period=14):
+# ─── NEWS (TAVILY) ────────────────────────────────────────────────────────────
+
+def fetch_news(ticker: str, company: str) -> list[dict]:
+    """抓近3天股票相关新闻。"""
+    if not TAVILY_API_KEY:
+        return []
+    try:
+        resp = requests.post("https://api.tavily.com/search", json={
+            "api_key":      TAVILY_API_KEY,
+            "query":        f"{ticker} {company} stock news catalyst earnings",
+            "search_depth": "basic",
+            "max_results":  5,
+            "days":         3,
+            "include_domains": [
+                "reuters.com", "bloomberg.com", "cnbc.com", "wsj.com",
+                "marketwatch.com", "seekingalpha.com", "finance.yahoo.com",
+                "ft.com", "barrons.com",
+            ],
+        }, timeout=15)
+        if resp.status_code != 200:
+            return []
+        return [
+            {"title":   i.get("title", ""),
+             "content": i.get("content", "")[:300],
+             "date":    i.get("published_date", "")[:10]}
+            for i in resp.json().get("results", [])
+        ]
+    except Exception as e:
+        print(f"[NEWS ERROR] {ticker}: {e}")
+        return []
+
+def fetch_macro_news() -> list[dict]:
+    """抓宏观/政策新闻（FED、CPI、关税等）。"""
+    if not TAVILY_API_KEY:
+        return []
+    try:
+        resp = requests.post("https://api.tavily.com/search", json={
+            "api_key":      TAVILY_API_KEY,
+            "query":        "US Federal Reserve interest rate CPI stock market tariff today",
+            "search_depth": "basic",
+            "max_results":  4,
+            "days":         2,
+        }, timeout=15)
+        if resp.status_code != 200:
+            return []
+        return [{"title": i.get("title", ""), "content": i.get("content", "")[:250]}
+                for i in resp.json().get("results", [])]
+    except Exception as e:
+        print(f"[MACRO NEWS ERROR]: {e}")
+        return []
+
+# ─── SHORT-TERM INDICATORS (DAY/SWING OPTIMIZED) ──────────────────────────────
+
+def compute_rsi(close, period: int = 7) -> float:
+    """RSI(7) - 比标准 14 更敏感，适合日内/短线。"""
     delta = close.diff()
     gain  = delta.clip(lower=0).rolling(period).mean()
     loss  = (-delta.clip(upper=0)).rolling(period).mean()
     rs    = gain / loss
     return round(float((100 - 100 / (1 + rs)).iloc[-1]), 2)
 
-def compute_rsi_series(close, period=14):
-    delta = close.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / loss
-    return 100 - (100 / (1 + rs))
+def compute_macd(close, fast: int = 5, slow: int = 13, signal: int = 5) -> dict:
+    """MACD(5/13/5) - Linda Raschke 经典日内设置。"""
+    ema_f = close.ewm(span=fast, adjust=False).mean()
+    ema_s = close.ewm(span=slow, adjust=False).mean()
+    macd  = ema_f - ema_s
+    sig   = macd.ewm(span=signal, adjust=False).mean()
+    hist  = macd - sig
+    cross_up   = (hist.iloc[-2] < 0 and hist.iloc[-1] > 0) if len(hist) >= 2 else False
+    cross_down = (hist.iloc[-2] > 0 and hist.iloc[-1] < 0) if len(hist) >= 2 else False
+    return {
+        "macd":       round(float(macd.iloc[-1]), 4),
+        "signal":     round(float(sig.iloc[-1]),  4),
+        "hist":       round(float(hist.iloc[-1]), 4),
+        "cross_up":   bool(cross_up),
+        "cross_down": bool(cross_down),
+    }
 
-def compute_macd(close):
-    ema12  = close.ewm(span=12, adjust=False).mean()
-    ema26  = close.ewm(span=26, adjust=False).mean()
-    macd   = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-    return (round(float(macd.iloc[-1]), 4),
-            round(float(signal.iloc[-1]), 4),
-            round(float((macd - signal).iloc[-1]), 4))
-
-def compute_ema(close, period):
+def compute_ema(close, period: int) -> float:
     return round(float(close.ewm(span=period, adjust=False).mean().iloc[-1]), 4)
 
-def compute_ma(close, period):
-    return round(float(close.rolling(period).mean().iloc[-1]), 4)
-
-def compute_bollinger(close, period=20, std_dev=2.0):
+def compute_bollinger(close, period: int = 20, std_dev: float = 2.0) -> dict:
     sma   = close.rolling(period).mean()
     std   = close.rolling(period).std()
     upper = sma + std_dev * std
     lower = sma - std_dev * std
     price     = float(close.iloc[-1])
-    cur_upper = float(upper.iloc[-1])
-    cur_lower = float(lower.iloc[-1])
-    cur_mid   = float(sma.iloc[-1])
-    bandwidth = (cur_upper - cur_lower) / cur_mid if cur_mid != 0 else 0
-    pct_b     = (price - cur_lower) / (cur_upper - cur_lower) if (cur_upper - cur_lower) != 0 else 0.5
-    bw_s      = ((upper - lower) / sma).dropna()
-    recent    = bw_s.iloc[-50:] if len(bw_s) >= 50 else bw_s
-    squeeze   = bandwidth <= float(recent.quantile(0.20))
-    breakout  = "up" if price > cur_upper else ("down" if price < cur_lower else "inside")
+    cu, cl, cm = float(upper.iloc[-1]), float(lower.iloc[-1]), float(sma.iloc[-1])
+    bw    = (cu - cl) / cm if cm != 0 else 0
+    pct_b = (price - cl) / (cu - cl) if (cu - cl) != 0 else 0.5
+    bw_s  = ((upper - lower) / sma).dropna()
+    recent = bw_s.iloc[-50:] if len(bw_s) >= 50 else bw_s
+    squeeze  = bool(bw <= float(recent.quantile(0.20)))
+    breakout = "up" if price > cu else ("down" if price < cl else "inside")
     return {
-        "upper": round(cur_upper, 2), "middle": round(cur_mid, 2),
-        "lower": round(cur_lower, 2), "bandwidth": round(bandwidth, 4),
+        "upper": round(cu, 2), "middle": round(cm, 2), "lower": round(cl, 2),
         "pct_b": round(pct_b, 3), "squeeze": squeeze, "breakout": breakout,
     }
 
-def compute_obv(close, volume):
-    direction = close.diff().apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
-    obv       = (direction * volume).cumsum()
-    slope     = float(obv.iloc[-1]) - float(obv.iloc[-6]) if len(obv) >= 6 else 0
-    p_now, p_prev = float(close.iloc[-1]), float(close.iloc[-6]) if len(close) >= 6 else float(close.iloc[-1])
-    return {
-        "obv_trend":    "up" if slope > 0 else "down",
-        "bull_diverge": (p_now < p_prev) and (slope > 0),
-        "bear_diverge": (p_now > p_prev) and (slope < 0),
-    }
-
-def compute_volume_surge(volume):
+def compute_volume_surge(volume) -> dict:
+    """放量倍率（vs 20-bar 均量），≥1.8x 视为异动。"""
     avg = float(volume.rolling(20).mean().iloc[-1])
     cur = float(volume.iloc[-1])
     ratio = cur / avg if avg > 0 else 1.0
-    return {"ratio": round(ratio, 2), "surge": ratio >= 2.0}
+    return {"ratio": round(ratio, 2), "surge": ratio >= 1.8}
 
-def compute_atr(high, low, close, period=14):
-    prev  = close.shift(1)
-    tr    = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
-    atr   = float(tr.rolling(period).mean().iloc[-1])
-    atr_p = float(tr.rolling(period).mean().iloc[-5]) if len(tr) >= 5 else atr
-    return {"atr": round(atr, 4), "atr_pct": round((atr / float(close.iloc[-1])) * 100, 2),
-            "expanding": atr > atr_p}
+def compute_atr(high, low, close, period: int = 14) -> dict:
+    prev = close.shift(1)
+    tr   = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    atr  = float(tr.rolling(period).mean().iloc[-1])
+    return {
+        "atr":     round(atr, 4),
+        "atr_pct": round((atr / float(close.iloc[-1])) * 100, 2),
+    }
 
-def compute_stochastic(high, low, close, k_period=14, d_period=3):
-    ll   = low.rolling(k_period).min()
-    hh   = high.rolling(k_period).max()
-    k    = 100 * (close - ll) / (hh - ll + 1e-9)
-    d    = k.rolling(d_period).mean()
-    kv   = round(float(k.iloc[-1]), 2)
-    dv   = round(float(d.iloc[-1]), 2)
-    kp   = float(k.iloc[-2]) if len(k) >= 2 else kv
-    dp   = float(d.iloc[-2]) if len(d) >= 2 else dv
-    return {"k": kv, "d": dv,
-            "cross_up":   (kp < dp) and (kv > dv) and kv < 30,
-            "cross_down": (kp > dp) and (kv < dv) and kv > 70}
+def compute_stochastic(high, low, close, k: int = 9, d: int = 3) -> dict:
+    """Stochastic(9,3) - 比标准 14,3 更适合短线。"""
+    ll = low.rolling(k).min()
+    hh = high.rolling(k).max()
+    kv = 100 * (close - ll) / (hh - ll + 1e-9)
+    dv = kv.rolling(d).mean()
+    k_now = round(float(kv.iloc[-1]), 2)
+    d_now = round(float(dv.iloc[-1]), 2)
+    kp = float(kv.iloc[-2]) if len(kv) >= 2 else k_now
+    dp = float(dv.iloc[-2]) if len(dv) >= 2 else d_now
+    return {
+        "k": k_now, "d": d_now,
+        "cross_up":   bool((kp < dp) and (k_now > d_now) and k_now < 30),
+        "cross_down": bool((kp > dp) and (k_now < d_now) and k_now > 70),
+    }
 
-def compute_vwap(df):
-    typical = (df["High"] + df["Low"] + df["Close"]) / 3
-    vwap    = (typical * df["Volume"]).cumsum() / df["Volume"].cumsum()
+def compute_vwap_today(df) -> float:
+    """当日 VWAP（以最新交易日所有 bar 计算）。"""
+    try:
+        last_date = df.index[-1].date()
+        today = df[df.index.date == last_date]
+        if len(today) == 0:
+            today = df.tail(7)
+    except Exception:
+        today = df.tail(7)
+    typical = (today["High"] + today["Low"] + today["Close"]) / 3
+    vwap = (typical * today["Volume"]).cumsum() / today["Volume"].cumsum()
     return round(float(vwap.iloc[-1]), 2)
 
-def compute_gap(df):
-    if len(df) < 2:
+def compute_gap(df_daily) -> dict:
+    """基于日线计算今日跳空。"""
+    if len(df_daily) < 2:
         return {"gap_pct": 0.0, "gap_up": False, "gap_down": False}
-    prev  = float(df["Close"].iloc[-2])
-    open_ = float(df["Open"].iloc[-1])
+    prev  = float(df_daily["Close"].iloc[-2])
+    open_ = float(df_daily["Open"].iloc[-1])
     pct   = ((open_ - prev) / prev) * 100
-    return {"gap_pct": round(pct, 2), "gap_up": pct >= 2.0, "gap_down": pct <= -2.0}
+    return {"gap_pct": round(pct, 2), "gap_up": pct >= 1.5, "gap_down": pct <= -1.5}
 
-def compute_rsi_divergence(close):
-    rsi = compute_rsi_series(close)
-    if len(close) < 10:
-        return {"bull": False, "bear": False}
-    pn, pp = float(close.iloc[-1]), float(close.iloc[-10])
-    rn, rp = float(rsi.iloc[-1]),   float(rsi.iloc[-10])
-    return {"bull": (pn < pp) and (rn > rp), "bear": (pn > pp) and (rn < rp)}
+def compute_support_resistance(df_daily, lookback: int = 10) -> dict:
+    """近 N 日支撑/压力（基于日线 high/low）。"""
+    r = df_daily.tail(lookback)
+    return {
+        "resistance": round(float(r["High"].max()), 2),
+        "support":    round(float(r["Low"].min()),  2),
+    }
 
-# SIGNAL ENGINE
-def get_signal(price, rsi, macd, macd_sig, ema9, ema21, ma50, ma200,
-               boll, obv, vol, atr, stoch, vwap, rsi_div):
-    buy_v, sell_v = 0, 0
+def compute_momentum(close, period: int = 5) -> float:
+    """N-bar 动能 (%)，捕捉短线方向。"""
+    if len(close) < period + 1:
+        return 0.0
+    return round((float(close.iloc[-1]) / float(close.iloc[-1 - period]) - 1) * 100, 2)
+
+# ─── TECHNICAL SCORING (0-10 buy / 0-10 sell) ─────────────────────────────────
+
+def compute_technical_score(price, rsi, macd, ema9, ema21, boll, vol, stoch,
+                            vwap, momentum, gap):
+    """
+    短线技术评分。返回 (buy_score 0-10, sell_score 0-10, alerts)。
+    每项权重已按短线交易调整。
+    """
+    buy, sell = 0, 0
     alerts = []
 
-    # 1 RSI
-    if rsi < 35:   buy_v  += 1
-    elif rsi > 65: sell_v += 1
+    # 1. RSI(7)
+    if rsi <= 25:    buy += 2; alerts.append(f"RSI({rsi}) 严重超卖")
+    elif rsi <= 35:  buy += 1
+    elif rsi >= 75:  sell += 2; alerts.append(f"RSI({rsi}) 严重超买")
+    elif rsi >= 65:  sell += 1
 
-    # 2 MACD
-    if macd > macd_sig:   buy_v  += 1
-    elif macd < macd_sig: sell_v += 1
+    # 2. MACD(5/13/5) - 短期动能
+    if macd["cross_up"]:    buy += 2;  alerts.append("MACD 金叉")
+    elif macd["cross_down"]: sell += 2; alerts.append("MACD 死叉")
+    elif macd["hist"] > 0:   buy += 1
+    elif macd["hist"] < 0:   sell += 1
 
-    # 3 EMA 9/21
-    if ema9 > ema21:   buy_v  += 1
-    elif ema9 < ema21: sell_v += 1
+    # 3. EMA 9/21 短期趋势
+    if ema9 > ema21 and price > ema9:    buy  += 1
+    elif ema9 < ema21 and price < ema9:  sell += 1
 
-    # 4 MA 50/200
-    if price > ma50 and ma50 > ma200: buy_v  += 1
-    elif price < ma50:                sell_v += 1
+    # 4. VWAP - 日内关键位
+    if price > vwap * 1.005:    buy  += 1
+    elif price < vwap * 0.995:  sell += 1
 
-    # 5 Bollinger squeeze / breakout
+    # 5. Bollinger Bands
     if boll["squeeze"]:
-        alerts.append("BB Squeeze - coiling")
-    elif boll["breakout"] == "up":
-        buy_v  += 1
-        alerts.append("BB Breakout UP")
+        alerts.append("BB 收窄（蓄势待发）")
+    if boll["breakout"] == "up":
+        buy += 2; alerts.append("BB 上轨突破")
     elif boll["breakout"] == "down":
-        sell_v += 1
-        alerts.append("BB Breakout DOWN")
+        sell += 2; alerts.append("BB 下轨跌破")
+    elif boll["pct_b"] < 0.10:
+        buy += 1
+    elif boll["pct_b"] > 0.90:
+        sell += 1
 
-    # 6 Bollinger %B
-    if boll["pct_b"] < 0.05:   buy_v  += 1
-    elif boll["pct_b"] > 0.95: sell_v += 1
-
-    # 7 OBV trend
-    if obv["obv_trend"] == "up":     buy_v  += 1
-    elif obv["obv_trend"] == "down": sell_v += 1
-
-    # 8 OBV divergence (bonus)
-    if obv["bull_diverge"]:
-        buy_v  += 1
-        alerts.append("OBV Bull Divergence")
-    if obv["bear_diverge"]:
-        sell_v += 1
-        alerts.append("OBV Bear Divergence")
-
-    # 9 Volume surge
+    # 6. Volume surge
     if vol["surge"]:
-        if price >= ma50:
-            buy_v  += 1
-            alerts.append(f"Volume Surge {vol['ratio']}x")
+        if momentum > 0:
+            buy += 1; alerts.append(f"放量 {vol['ratio']}x↑")
         else:
-            sell_v += 1
-            alerts.append(f"Volume Surge {vol['ratio']}x (bearish)")
+            sell += 1; alerts.append(f"放量 {vol['ratio']}x↓")
 
-    # 10 Stochastic
-    if stoch["cross_up"]:
-        buy_v  += 1
-        alerts.append("Stoch cross UP (oversold)")
-    elif stoch["cross_down"]:
-        sell_v += 1
-        alerts.append("Stoch cross DOWN (overbought)")
-    elif stoch["k"] < 20:   buy_v  += 1
-    elif stoch["k"] > 80:   sell_v += 1
+    # 7. Stochastic(9,3) cross
+    if stoch["cross_up"]:    buy  += 1; alerts.append("Stoch 底部金叉")
+    elif stoch["cross_down"]: sell += 1; alerts.append("Stoch 顶部死叉")
 
-    # 11 VWAP
-    if price > vwap:   buy_v  += 1
-    elif price < vwap: sell_v += 1
+    # 8. 5-bar 动能
+    if momentum >= 3:    buy  += 1
+    elif momentum <= -3: sell += 1
 
-    # 12 RSI divergence (bonus)
-    if rsi_div["bull"]:
-        buy_v  += 1
-        alerts.append("RSI Bull Divergence")
-    if rsi_div["bear"]:
-        sell_v += 1
-        alerts.append("RSI Bear Divergence")
+    # 9. Gap (盘前/开盘重点)
+    if gap["gap_up"]:    alerts.append(f"高开 {gap['gap_pct']:+.1f}%")
+    elif gap["gap_down"]: alerts.append(f"低开 {gap['gap_pct']:+.1f}%")
 
-    # 13 ATR expanding
-    if atr["expanding"] and not boll["squeeze"]:
-        if buy_v > sell_v:
-            buy_v  += 1
-            alerts.append("ATR Expanding (bull)")
-        else:
-            sell_v += 1
-            alerts.append("ATR Expanding (bear)")
+    return min(buy, 10), min(sell, 10), alerts
 
-    # Verdict: need 5+ votes
-    if buy_v >= 7:
-        return "BUY STRONG", alerts
-    elif buy_v >= 5:
-        return "BUY", alerts
-    elif sell_v >= 7:
-        return "SELL STRONG", alerts
-    elif sell_v >= 5:
-        return "SELL", alerts
-    else:
-        return "HOLD", alerts
+# ─── MARKET DATA ──────────────────────────────────────────────────────────────
 
-SIGNAL_EMOJI = {
-    "BUY STRONG": "🟢💪 STRONG BUY",
-    "BUY":        "🟢 BUY",
-    "SELL STRONG":"🔴💪 STRONG SELL",
-    "SELL":       "🔴 SELL",
-    "HOLD":       "🟡 HOLD",
-}
-
-# MARKET DATA
-def fetch_ohlcv(ticker: str, retries: int = 3):
+def fetch_intraday(ticker: str, retries: int = 3) -> Optional[pd.DataFrame]:
+    """1h × 60d，含盘前盘后。"""
     for attempt in range(retries):
         try:
-            df = yf.download(ticker, period="6mo", interval="1d",
-                             progress=False, auto_adjust=True)
-            if df is None or len(df) < 30:
+            df = yf.download(ticker, period="60d", interval="1h",
+                             progress=False, auto_adjust=True, prepost=True)
+            if df is None or len(df) < 50:
                 return None
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
             return df
         except Exception as e:
             if attempt < retries - 1:
-                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s
-                print(f"[RETRY] {ticker} attempt {attempt + 1} failed: {e}. Retrying in {wait}s...")
-                time.sleep(wait)
+                time.sleep(10 * (2 ** attempt))
             else:
-                print(f"[ERROR] {ticker}: {e}")
+                print(f"[ERROR intraday] {ticker}: {e}")
                 return None
 
-# ANALYZE
-def analyze(ticker, premarket=False):
+def fetch_daily(ticker: str, retries: int = 3) -> Optional[pd.DataFrame]:
+    """日线 3 月（支撑/压力/缺口上下文）。"""
+    for attempt in range(retries):
+        try:
+            df = yf.download(ticker, period="3mo", interval="1d",
+                             progress=False, auto_adjust=True)
+            if df is None or len(df) < 20:
+                return None
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            return df
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(5 * (2 ** attempt))
+            else:
+                print(f"[ERROR daily] {ticker}: {e}")
+                return None
+
+# ─── FULL ANALYSIS ────────────────────────────────────────────────────────────
+
+def analyze(ticker: str) -> Optional[dict]:
     try:
-        df = fetch_ohlcv(ticker)
-        if df is None or len(df) < 30:
+        df_h = fetch_intraday(ticker)
+        df_d = fetch_daily(ticker)
+        if df_h is None or df_d is None:
             return None
 
-        close  = df["Close"].squeeze()
-        high   = df["High"].squeeze()
-        low    = df["Low"].squeeze()
-        volume = df["Volume"].squeeze()
-        price  = round(float(close.iloc[-1]), 2)
+        close_h = df_h["Close"].squeeze()
+        high_h  = df_h["High"].squeeze()
+        low_h   = df_h["Low"].squeeze()
+        vol_h   = df_h["Volume"].squeeze()
+        price   = round(float(close_h.iloc[-1]), 2)
 
-        rsi              = compute_rsi(close)
-        macd_v, sig_v, _ = compute_macd(close)
-        ema9             = compute_ema(close, 9)
-        ema21            = compute_ema(close, 21)
-        ma50             = compute_ma(close, 50)
-        ma200            = compute_ma(close, 200)
-        boll             = compute_bollinger(close)
-        obv_d            = compute_obv(close, volume)
-        vol_d            = compute_volume_surge(volume)
-        atr_d            = compute_atr(high, low, close)
-        stoch            = compute_stochastic(high, low, close)
-        vwap             = compute_vwap(df)
-        rsi_div          = compute_rsi_divergence(close)
-        gap              = compute_gap(df)
+        # 日线变动 (短线参考)
+        chg1 = round(((price - float(df_d["Close"].iloc[-2])) /
+                       float(df_d["Close"].iloc[-2])) * 100, 2) if len(df_d) >= 2 else 0.0
+        chg5 = round(((price - float(df_d["Close"].iloc[-6])) /
+                       float(df_d["Close"].iloc[-6])) * 100, 2) if len(df_d) >= 6 else 0.0
 
-        signal, alerts = get_signal(
-            price, rsi, macd_v, sig_v, ema9, ema21,
-            ma50, ma200, boll, obv_d, vol_d, atr_d,
-            stoch, vwap, rsi_div
+        rsi      = compute_rsi(close_h, period=7)
+        macd_d   = compute_macd(close_h, fast=5, slow=13, signal=5)
+        ema9     = compute_ema(close_h, 9)
+        ema21    = compute_ema(close_h, 21)
+        boll     = compute_bollinger(close_h, period=20)
+        vol_d    = compute_volume_surge(vol_h)
+        atr_h    = compute_atr(high_h, low_h, close_h)
+        # 日线 ATR 用于止损（小时 ATR 偏小）
+        atr_dly  = compute_atr(df_d["High"].squeeze(), df_d["Low"].squeeze(),
+                                df_d["Close"].squeeze())
+        stoch    = compute_stochastic(high_h, low_h, close_h, k=9, d=3)
+        vwap     = compute_vwap_today(df_h)
+        momentum = compute_momentum(close_h, period=5)
+        gap      = compute_gap(df_d)
+        sr       = compute_support_resistance(df_d, lookback=10)
+
+        buy_s, sell_s, alerts = compute_technical_score(
+            price, rsi, macd_d, ema9, ema21, boll, vol_d, stoch,
+            vwap, momentum, gap,
         )
 
-        if premarket:
-            if gap["gap_up"]:
-                alerts.insert(0, f"GAP UP {gap['gap_pct']:+.2f}%")
-            elif gap["gap_down"]:
-                alerts.insert(0, f"GAP DOWN {gap['gap_pct']:+.2f}%")
-
         return {
-            "ticker": ticker, "price": price,
-            "signal": signal, "signal_label": SIGNAL_EMOJI.get(signal, signal),
-            "rsi": rsi, "macd": macd_v, "macd_sig": sig_v,
-            "ema9": ema9, "ema21": ema21, "ma50": ma50, "ma200": ma200,
-            "boll": boll, "obv": obv_d, "vol": vol_d,
-            "atr": atr_d, "stoch": stoch, "vwap": vwap,
-            "gap": gap, "alerts": alerts,
+            "ticker": ticker,
+            "company": COMPANY_NAMES.get(ticker, ticker),
+            "price": price, "chg1": chg1, "chg5": chg5,
+            "rsi": rsi, "macd": macd_d, "ema9": ema9, "ema21": ema21,
+            "boll": boll, "vol": vol_d,
+            "atr_h": atr_h, "atr_d": atr_dly,
+            "stoch": stoch, "vwap": vwap, "momentum": momentum,
+            "gap": gap, "sr": sr,
+            "buy_score": buy_s, "sell_score": sell_s, "alerts": alerts,
         }
     except Exception as e:
-        print(f"[ERROR] {ticker}: {e}")
+        print(f"[ANALYZE ERROR] {ticker}: {e}")
         return None
 
-# SESSION
-def get_session(now_et):
-    total = now_et.hour * 60 + now_et.minute
-    if 240 <= total < 570:    return "Pre-Market", True
-    elif 570 <= total < 960:  return "Market Hours", False
-    elif 960 <= total < 1200: return "After-Hours", False
-    else:                     return "Off-Hours", False
+# ─── GEMINI AI ────────────────────────────────────────────────────────────────
 
-SESSION_EMOJI = {
-    "Pre-Market":  "🌅",
-    "Market Hours":"📈",
-    "After-Hours": "🌆",
-    "Off-Hours":   "🌙",
-}
+def gemini_analyze(tech: dict, news: list[dict], macro_news: list[dict]) -> dict:
+    news_text = "\n".join([
+        f"- [{n.get('date', '')}] {n['title'][:80]}: {n['content'][:140]}"
+        for n in news[:5]
+    ]) or "无相关新闻"
+    macro_text = "\n".join([f"- {n['title'][:80]}" for n in macro_news[:4]]) or "无宏观新闻"
 
-SESSION_NAME_ZH = {
-    "Pre-Market":  "盘前交易",
-    "Market Hours":"交易时段",
-    "After-Hours": "盘后交易",
-    "Off-Hours":   "休市时段",
-}
+    prompt = f"""你是资深短线交易员，专做日内交易和波段交易（持仓周期：日内 ~ 1周）。
+请基于下列数据，给出"短线交易"建议——综合考虑新闻催化和短期技术信号。
 
-# ─── HUMAN-FRIENDLY HELPERS ───────────────────────────────────────────────────
+【{tech['ticker']} ({tech['company']})】
+现价 ${tech['price']} | 日涨跌 {tech['chg1']:+.2f}% | 5日涨跌 {tech['chg5']:+.2f}%
+近10日支撑/压力: ${tech['sr']['support']} / ${tech['sr']['resistance']}
+日线 ATR(14): ${tech['atr_d']['atr']} ({tech['atr_d']['atr_pct']}%) ← 用于止损参考
 
-def signal_banner(signal: str) -> str:
-    """Big clear action banner based on signal strength."""
-    banners = {
-        "BUY STRONG": "✅✅ STRONG BUY — 高度信心，多项指标一致看涨",
-        "BUY":        "✅ BUY — 可考虑入场",
-        "SELL STRONG":"❌❌ STRONG SELL — 多项指标转跌，建议离场",
-        "SELL":       "❌ SELL — 考虑减仓或观望",
-        "HOLD":       "⏸ HOLD — 信号混合，方向不明，继续等待",
+短线技术指标 (1h K线):
+- RSI(7): {tech['rsi']}
+- MACD(5/13/5): hist={tech['macd']['hist']:+.4f} (金叉={tech['macd']['cross_up']}, 死叉={tech['macd']['cross_down']})
+- EMA9/21: {tech['ema9']} / {tech['ema21']}
+- Bollinger(20): %B={tech['boll']['pct_b']}, squeeze={tech['boll']['squeeze']}, breakout={tech['boll']['breakout']}
+- Stoch(9,3): K={tech['stoch']['k']} D={tech['stoch']['d']}
+- 当日 VWAP: ${tech['vwap']}
+- 5-bar 动能: {tech['momentum']:+.2f}%
+- 成交量: {tech['vol']['ratio']}x (放量={tech['vol']['surge']})
+- 跳空: {tech['gap']['gap_pct']:+.2f}%
+
+技术评分: 买入信号 {tech['buy_score']}/10 ｜ 卖出信号 {tech['sell_score']}/10
+警报: {', '.join(tech['alerts']) or '无'}
+
+近3天个股新闻:
+{news_text}
+
+宏观/政策新闻:
+{macro_text}
+
+【任务】综合"新闻催化 × 技术信号"，给出短线交易建议。
+评分标准 (score 1-10)：
+  10 = 极强买入信号（多重确认 + 强催化）
+  8-9 = 强烈买入
+  6-7 = 买入
+  5   = 中性观望（信号矛盾或不明）
+  4   = 卖出
+  2-3 = 强烈卖出
+  1   = 极强卖出信号
+
+严格返回 JSON（不要 markdown 代码块）：
+{{
+  "score": 整数 1-10,
+  "action": "强烈买入/买入/观望/卖出/强烈卖出",
+  "hold_period": "日内/2-3天/3-5天/1周",
+  "entry_low":  数字（建议入场价下限）,
+  "entry_high": 数字（建议入场价上限）,
+  "target_1":   数字（第一目标，短期 1-3 天）,
+  "target_2":   数字（第二目标，1周内）,
+  "stop_loss":  数字（基于 ATR/支撑位的止损）,
+  "reason":     "40字内：核心决策理由（新闻+指标）",
+  "news_impact":"30字内：新闻对短期的影响判断",
+  "catalyst":   "30字内：未来1周潜在催化剂",
+  "risk_level": "低/中/高",
+  "confidence": "高/中/低（指标和新闻一致性）",
+  "summary":    "60字内：具体执行建议（什么价位买/卖、持有多久、止损位）"
+}}"""
+
+    for model in [GEMINI_MODEL, GEMINI_MODEL_FALLBACK]:
+        for api_key in GEMINI_API_KEYS:
+            try:
+                client = genai.Client(api_key=api_key)
+                time.sleep(GEMINI_REQUEST_DELAY)
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.3,
+                        response_mime_type="application/json",
+                    ),
+                )
+                raw = re.sub(r"```json|```", "", response.text.strip()).strip()
+                result = json.loads(raw)
+                result["_model"] = model
+                print(f"[AI OK] {tech['ticker']} — {model} → {result.get('action')} ({result.get('score')}/10)")
+                return result
+            except Exception as e:
+                print(f"[AI ERROR] {tech['ticker']} {model} ...{api_key[-6:]}: {e}")
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    time.sleep(5)
+
+    # ─── Fallback：纯技术评分推导 ───
+    net = tech["buy_score"] - tech["sell_score"]
+    score = max(1, min(10, 5 + net // 2))
+    if score >= 8:   action = "强烈买入"
+    elif score >= 6: action = "买入"
+    elif score <= 2: action = "强烈卖出"
+    elif score <= 4: action = "卖出"
+    else:            action = "观望"
+    atr_d = tech["atr_d"]["atr"]
+    return {
+        "score": score, "action": action, "hold_period": "2-3天",
+        "entry_low":  round(tech["price"] - atr_d * 0.3, 2),
+        "entry_high": round(tech["price"] + atr_d * 0.3, 2),
+        "target_1":   round(tech["price"] + atr_d * 1.0, 2),
+        "target_2":   round(tech["price"] + atr_d * 2.0, 2),
+        "stop_loss":  round(tech["price"] - atr_d * 1.5, 2),
+        "reason":     "AI不可用，仅技术评分",
+        "news_impact":"无法获取",
+        "catalyst":   "未知",
+        "risk_level": "中", "confidence": "低",
+        "summary":    "AI 暂不可用，仅参考技术面。",
+        "_model":     "fallback",
     }
-    return banners.get(signal, "⏸ HOLD — 信号混合，方向不明，继续等待")
 
-def plain_reason(r: dict) -> list[str]:
-    """
-    Translate raw indicator values into one-line plain English sentences
-    a beginner can understand at a glance.
-    """
-    reasons = []
-    rsi, boll, obv, vol, stoch, gap = (
-        r["rsi"], r["boll"], r["obv"], r["vol"], r["stoch"], r["gap"]
+# ─── MESSAGE BUILDER ──────────────────────────────────────────────────────────
+
+ACTION_EMOJI = {
+    "强烈买入": "🚀🚀", "买入": "🟢", "观望": "🟡",
+    "卖出":   "🔴",   "强烈卖出": "❌❌",
+}
+RISK_EMOJI = {"低": "🟢", "中": "🟡", "高": "🔴"}
+CONF_EMOJI = {"高": "💪", "中": "✋", "低": "⚠️"}
+
+def score_bar(score: int) -> str:
+    """1-10 可视化条。"""
+    s = max(1, min(10, int(score)))
+    if s >= 7:   emoji = "🟩"
+    elif s <= 4: emoji = "🟥"
+    else:        emoji = "🟨"
+    return emoji * s + "⬜" * (10 - s) + f"  <b>{s}/10</b>"
+
+def build_stock_card(tech: dict, ai: dict) -> str:
+    score   = int(ai.get("score", 5))
+    act_e   = ACTION_EMOJI.get(ai["action"], "🟡")
+    risk_e  = RISK_EMOJI.get(ai["risk_level"], "🟡")
+    conf_e  = CONF_EMOJI.get(ai["confidence"], "✋")
+    chg_arrow = "📈" if tech["chg1"] >= 0 else "📉"
+
+    return (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{tech['ticker']}</b> {tech['company']} ｜ ${tech['price']} {chg_arrow} {tech['chg1']:+.2f}%\n"
+        f"\n"
+        f"{act_e} <b>{ai['action']}</b>  {score_bar(score)}\n"
+        f"   {ai['reason']}\n"
+        f"\n"
+        f"⏱ 持仓 <b>{ai['hold_period']}</b> ｜ {risk_e} 风险 {ai['risk_level']} ｜ {conf_e} 信心 {ai['confidence']}\n"
+        f"\n"
+        f"🎯 <b>入场区间</b> ${ai['entry_low']:.2f} ~ ${ai['entry_high']:.2f}\n"
+        f"📍 目标1 <b>${ai['target_1']}</b> ｜ 目标2 <b>${ai['target_2']}</b>\n"
+        f"🛑 止损 <b>${ai['stop_loss']}</b>\n"
+        f"\n"
+        f"📊 <b>技术面</b>  买 {tech['buy_score']}/10 ｜ 卖 {tech['sell_score']}/10\n"
+        f"   <i>RSI(7) {tech['rsi']} · MACD {tech['macd']['hist']:+.3f} · BB%B {tech['boll']['pct_b']}</i>\n"
+        f"   <i>VWAP ${tech['vwap']} · Vol {tech['vol']['ratio']}x · 动能 {tech['momentum']:+.2f}%</i>\n"
+        f"   <i>支撑 ${tech['sr']['support']} · 压力 ${tech['sr']['resistance']} · ATR ${tech['atr_d']['atr']}</i>\n"
+        f"   ⚡ {' · '.join(tech['alerts']) if tech['alerts'] else '无特殊警报'}\n"
+        f"\n"
+        f"📰 <b>新闻：</b>{ai['news_impact']}\n"
+        f"🔮 <b>催化剂：</b>{ai['catalyst']}\n"
+        f"💡 <b>执行建议：</b>{ai['summary']}\n"
+        f"<i>🤖 {ai.get('_model', 'unknown')}</i>"
     )
-    price, ma50, ma200, ema9, ema21, vwap = (
-        r["price"], r["ma50"], r["ma200"], r["ema9"], r["ema21"], r["vwap"]
-    )
 
-    # Momentum (RSI)
-    if rsi < 30:
-        reasons.append(f"📉 超卖状态 (RSI {rsi}) — 价格可能即将反弹")
-    elif rsi > 70:
-        reasons.append(f"📈 超买状态 (RSI {rsi}) — 价格可能面临回调")
-    elif rsi < 45:
-        reasons.append(f"😐 动能偏弱 (RSI {rsi}) — 买方尚未主导市场")
-    else:
-        reasons.append(f"💪 动能健康 (RSI {rsi}) — 买方占据主动")
+SESSION_EMOJI = {"Pre-Market":"🌅","Market Hours":"📈","After-Hours":"🌆","Off-Hours":"🌙"}
+SESSION_NAME_ZH = {"Pre-Market":"盘前","Market Hours":"盘中","After-Hours":"盘后","Off-Hours":"休市"}
 
-    # Trend (EMA / MA)
-    if ema9 > ema21 and price > ma50:
-        reasons.append("📊 短期趋势向上 — EMA9 高于 EMA21，价格站上 MA50")
-    elif ema9 < ema21 and price < ma50:
-        reasons.append("📊 短期趋势向下 — EMA9 低于 EMA21，价格跌破 MA50")
+def get_session(now_et: datetime) -> str:
+    total = now_et.hour * 60 + now_et.minute
+    if   240 <= total < 570:  return "Pre-Market"
+    elif 570 <= total < 960:  return "Market Hours"
+    elif 960 <= total < 1200: return "After-Hours"
+    else:                     return "Off-Hours"
 
-    if price > ma200:
-        reasons.append("🏔 长期趋势向上 — 价格高于 MA200（200日均线）")
-    else:
-        reasons.append("🕳 长期趋势向下 — 价格低于 MA200（200日均线）")
+def build_report(results: list[dict], time_str: str, session: str) -> str:
+    sess_e  = SESSION_EMOJI.get(session, "")
+    sess_zh = SESSION_NAME_ZH.get(session, session)
 
-    # Bollinger Bands
-    if boll["squeeze"]:
-        reasons.append("🔵 Bollinger Band 收窄（Squeeze）— 即将出现大幅波动，方向待定")
-    elif boll["breakout"] == "up":
-        reasons.append("⬆️ 价格突破 BB 上轨 — 上涨动能强劲")
-    elif boll["breakout"] == "down":
-        reasons.append("⬇️ 价格跌破 BB 下轨 — 下行压力明显")
-    elif boll["pct_b"] < 0.15:
-        reasons.append("📌 价格贴近 BB 下轨 (%B 低) — 潜在反弹区域")
-    elif boll["pct_b"] > 0.85:
-        reasons.append("📌 价格贴近 BB 上轨 (%B 高) — 注意压力位")
+    lines = [
+        "<b>📊 短线交易信号报告</b>",
+        f"{sess_e} <b>{sess_zh}</b> ｜ 📅 {time_str}",
+        "<i>1h技术指标 + 实时新闻 + Gemini AI 综合评分 (1-10)</i>",
+        "",
+    ]
 
-    # Volume
-    if vol["surge"]:
-        if price >= ma50:
-            reasons.append(f"🔥 成交量异常放大 {vol['ratio']}× — 大买家正在进场")
-        else:
-            reasons.append(f"🔥 成交量异常放大 {vol['ratio']}× — 大卖家正在出货")
-    elif vol["ratio"] < 0.5:
-        reasons.append("😴 成交量极低 — 市场参与度不足，观望为主")
+    results.sort(key=lambda r: -int(r["ai"].get("score", 5)))
+    for r in results:
+        lines.append(build_stock_card(r["tech"], r["ai"]))
+        lines.append("")
 
-    # OBV (smart money)
-    if obv["bull_diverge"]:
-        reasons.append("🧠 OBV 看涨背离 — 价格下跌但资金悄然流入，隐藏买入信号")
-    elif obv["bear_diverge"]:
-        reasons.append("🧠 OBV 看跌背离 — 价格上涨但资金悄然流出，隐藏卖出信号")
-    elif obv["obv_trend"] == "up":
-        reasons.append("💰 OBV 趋势向上 — 资金整体流入该股票")
-    else:
-        reasons.append("💸 OBV 趋势向下 — 资金整体流出该股票")
+    lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
 
-    # Stochastic
-    if stoch["cross_up"]:
-        reasons.append("🔄 Stochastic 从超卖区向上交叉 — 早期买入信号")
-    elif stoch["cross_down"]:
-        reasons.append("🔄 Stochastic 从超买区向下交叉 — 早期卖出信号")
+    scores      = [int(r["ai"].get("score", 5)) for r in results]
+    strong_buy  = sum(1 for s in scores if s >= 8)
+    buy         = sum(1 for s in scores if 6 <= s < 8)
+    hold        = sum(1 for s in scores if 4 < s < 6)
+    sell        = sum(1 for s in scores if 2 < s <= 4)
+    strong_sell = sum(1 for s in scores if s <= 2)
 
-    # VWAP
-    if price > vwap:
-        reasons.append(f"📍 价格 ${price} 高于 VWAP ${vwap} — 今日买方主导")
-    else:
-        reasons.append(f"📍 价格 ${price} 低于 VWAP ${vwap} — 今日卖方主导")
-
-    # Gap (pre-market)
-    if gap["gap_up"]:
-        reasons.append(f"🚀 跳空高开 {gap['gap_pct']:+.1f}% — 隔夜买盘强劲")
-    elif gap["gap_down"]:
-        reasons.append(f"💥 跳空低开 {gap['gap_pct']:+.1f}% — 隔夜利空或抛压较重")
-
-    return reasons
-
-def confidence_bar(signal: str, buy_count: int, sell_count: int) -> str:
-    """Visual confidence bar showing how many signals agree."""
-    total = 13
-    if "BUY" in signal:
-        filled = min(buy_count, total)
-        bar = "🟩" * filled + "⬜" * (total - filled)
-        return f"信心指数: {bar} {buy_count}/{total} 项指标看涨"
-    elif "SELL" in signal:
-        filled = min(sell_count, total)
-        bar = "🟥" * filled + "⬜" * (total - filled)
-        return f"信心指数: {bar} {sell_count}/{total} 项指标看跌"
-    else:
-        bar = "🟨" * 5 + "⬜" * 8
-        return f"信心指数: {bar} 信号混合，方向不明"
-
-def count_votes(r: dict) -> tuple[int, int]:
-    """Re-count buy/sell votes from alerts and signal for confidence bar."""
-    sig = r["signal"]
-    if sig == "BUY STRONG":   return 8, 2
-    elif sig == "BUY":        return 6, 2
-    elif sig == "SELL STRONG": return 2, 8
-    elif sig == "SELL":       return 2, 6
-    else:                     return 4, 4
-
-# MESSAGE BUILDERS
-def build_stock_card(r: dict, show_gap: bool = False) -> str:
-    """Build one clean human-readable card per stock."""
-    lines = []
-    buy_v, sell_v = count_votes(r)
-
-    lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"<b>{r['ticker']}</b>  —  <b>${r['price']}</b>")
-    lines.append(f"")
-    lines.append(f"<b>{signal_banner(r['signal'])}</b>")
-    lines.append(f"")
-    lines.append(confidence_bar(r["signal"], buy_v, sell_v))
-    lines.append(f"")
-
-    lines.append("<b>分析原因：</b>")
-    for reason in plain_reason(r):
-        lines.append(f"  {reason}")
-
-    lines.append(f"")
+    lines.append("<b>📋 汇总</b>")
     lines.append(
-        f"<i>RSI {r['rsi']} · MACD {r['macd']} · "
-        f"BB %B {r['boll']['pct_b']} · Vol {r['vol']['ratio']}x · "
-        f"MA50 {r['ma50']}</i>"
+        f"🚀🚀 强烈买入 {strong_buy} ｜ 🟢 买入 {buy} ｜ "
+        f"🟡 观望 {hold} ｜ 🔴 卖出 {sell} ｜ ❌❌ 强烈卖出 {strong_sell}"
     )
+
+    top = [r for r in results if int(r["ai"].get("score", 5)) >= 7]
+    if top:
+        names = ", ".join([f"{r['tech']['ticker']}({r['ai']['score']})" for r in top])
+        lines.append(f"⭐ <b>重点关注：</b>{names}")
+
+    risky = [r["tech"]["ticker"] for r in results if r["ai"].get("risk_level") == "高"]
+    if risky:
+        lines.append(f"⚠️ <b>高风险：</b>{', '.join(risky)}")
+
+    lines.append("")
+    lines.append("<i>⚠️ AI 辅助生成，仅供短线交易参考，不构成投资建议。请严格执行止损。</i>")
     return "\n".join(lines)
 
-def build_standard_message(results, session, time_str):
-    emoji = SESSION_EMOJI.get(session, "")
-    session_zh = SESSION_NAME_ZH.get(session, session)
-    lines = [
-        f"<b>📊 股票信号报告</b>",
-        f"{emoji} <b>{session_zh}</b>  ·  {time_str}",
-        f"",
-        f"以下是当前市场给出的信号：",
-    ]
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 
-    order = {"BUY STRONG": 0, "BUY": 1, "HOLD": 2, "SELL": 3, "SELL STRONG": 4}
-    results_sorted = sorted(results, key=lambda r: order.get(r["signal"], 2))
-
-    for r in results_sorted:
-        lines.append(build_stock_card(r))
-
-    lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
-
-    buys  = sum(1 for r in results if "BUY"  in r["signal"])
-    sells = sum(1 for r in results if "SELL" in r["signal"])
-    holds = sum(1 for r in results if r["signal"] == "HOLD")
-
-    lines.append(f"")
-    lines.append(f"<b>汇总</b>")
-    lines.append(f"  ✅ {buys} 支股票信号看涨（BUY）")
-    lines.append(f"  ❌ {sells} 支股票信号看跌（SELL）")
-    lines.append(f"  ⏸ {holds} 支股票信号不明，建议观望")
-    lines.append(f"")
-    lines.append(f"<i>⚠️ 本报告仅供参考，不构成任何投资建议。入市需谨慎，风险自负。</i>")
-    return "\n".join(lines)
-
-def build_premarket_message(results, time_str):
-    lines = [
-        f"<b>🌅 盘前预警报告</b>",
-        f"开盘前参考  ·  {time_str}",
-        f"",
-        f"以下是今日开盘前需要关注的股票：",
-    ]
-
-    order = {"BUY STRONG": 0, "BUY": 1, "HOLD": 2, "SELL": 3, "SELL STRONG": 4}
-    results_sorted = sorted(results,
-        key=lambda r: (order.get(r["signal"], 2), -abs(r["gap"]["gap_pct"])))
-
-    for r in results_sorted:
-        lines.append(build_stock_card(r, show_gap=True))
-
-    lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
-
-    hot = [r["ticker"] for r in results if
-           "BUY" in r["signal"] or "SELL" in r["signal"] or
-           r["gap"]["gap_up"] or r["gap"]["gap_down"] or r["vol"]["surge"]]
-    if hot:
-        lines.append(f"")
-        lines.append(f"<b>⚡ 开盘重点关注：</b> {', '.join(hot)}")
-        lines.append(f"以上股票在开盘前信号最强，请密切留意。")
-
-    lines.append(f"")
-    lines.append(f"<i>⚠️ 本报告仅供参考，不构成任何投资建议。入市需谨慎，风险自负。</i>")
-    return "\n".join(lines)
-
-# MAIN
 def main():
     now_et   = datetime.now(ET)
-    session, is_premarket = get_session(now_et)
     time_str = now_et.strftime("%Y-%m-%d %H:%M ET")
-    deep_pm  = is_premarket and now_et.hour in PREMARKET_HOURS
+    session  = get_session(now_et)
+
+    print(f"[START] 短线分析 — {time_str} ({session})")
+    print(f"[INFO] 自选股 ({len(WATCHLIST)}): {', '.join(WATCHLIST)}")
+
+    print("[INFO] 抓取宏观新闻...")
+    macro_news = fetch_macro_news()
+    print(f"       共 {len(macro_news)} 条")
 
     results = []
     for ticker in WATCHLIST:
-        data = analyze(ticker, premarket=deep_pm)
-        if data:
-            results.append(data)
+        print(f"[INFO] 分析 {ticker}...")
+        tech = analyze(ticker)
+        if not tech:
+            print(f"       [SKIP] 数据不足")
+            continue
+        company = COMPANY_NAMES.get(ticker, ticker)
+        news = fetch_news(ticker, company)
+        print(f"       新闻 {len(news)} 条 ｜ 技术买{tech['buy_score']}/卖{tech['sell_score']}")
+        ai = gemini_analyze(tech, news, macro_news)
+        results.append({"tech": tech, "ai": ai})
+        time.sleep(1)
 
     if not results:
         send_telegram(
-            "⚠️ 股票信号机器人：本次周期未能获取任何数据。\n"
-            f"已尝试 {len(WATCHLIST)} 支股票 — 全部失败。\n"
-            f"时间：{time_str}\n请检查 Actions 日志了解详情。"
+            f"⚠️ 短线分析：本次周期未能获取任何数据。\n"
+            f"已尝试 {len(WATCHLIST)} 支股票，全部失败。\n"
+            f"时间：{time_str}"
         )
         return
 
-    if deep_pm:
-        msg = build_premarket_message(results, time_str)
-    else:
-        msg = build_standard_message(results, session, time_str)
-
-    send_telegram(msg)
-    mode = "PRE-MARKET" if deep_pm else "STANDARD"
-    print(f"[OK] {mode} report — {len(results)} tickers at {time_str}")
+    report = build_report(results, time_str, session)
+    send_telegram(report)
+    print(f"[OK] 报告已发送，共 {len(results)} 支股票")
 
 if __name__ == "__main__":
     main()

@@ -1,32 +1,23 @@
-name: Stock Signal Bot
+name: 短线交易信号 Short-Term Signal Bot
 
 on:
   schedule:
-    # Dedicated pre-market deep scans (EDT = UTC-4)
-    # - cron: "0 8 * * 1-5"    # 04:00 ET — early pre-market
-    # - cron: "0 11 * * 1-5"   # 07:00 ET — mid pre-market
-    # - cron: "0 13 * * 1-5"   # 09:00 ET — final pre-market (30 min before open)
-    # Hourly market hours (09:30–16:00 ET)
-    - cron: "30 13 * * 1-5"  # 09:30 ET — open bell
-    - cron: "0 15 * * 1-5"   # 11:00 ET
-    - cron: "0 16 * * 1-5"   # 12:00 ET
-    - cron: "0 17 * * 1-5"   # 13:00 ET
-    - cron: "0 18 * * 1-5"   # 14:00 ET
-    - cron: "0 19 * * 1-5"   # 15:00 ET
-    - cron: "0 20 * * 1-5"   # 16:00 ET — close bell
-    # After-hours (16:00–20:00 ET)
-    - cron: "0 21 * * 1-5"   # 17:00 ET
-    - cron: "0 22 * * 1-5"   # 18:00 ET
-    - cron: "0 23 * * 1-5"   # 19:00 ET
-    - cron: "0 0 * * 2-6"    # 20:00 ET
+    # ─── 日内交易黄金时段 (EDT = UTC-4，每日 6 次) ───
+    - cron: "30 12 * * 1-5"  # 08:30 ET — 经济数据高峰发布时段 (CPI/PPI/Jobs)
+    - cron: "45 13 * * 1-5"  # 09:45 ET — 开盘15分钟后，方向确认
+    - cron: "30 14 * * 1-5"  # 10:30 ET — 开盘1小时后，首小时反转窗口
+    - cron: "0 18 * * 1-5"   # 14:00 ET — 午后 / FOMC 利率声明时段
+    - cron: "30 19 * * 1-5"  # 15:30 ET — Power Hour，决定是否过夜
+    - cron: "15 20 * * 1-5"  # 16:15 ET — 收盘后15分钟，财报捕捉
   workflow_dispatch:
 
 jobs:
   send-signals:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # ← add this line
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,8 +31,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run stock analyzer
+      - name: Run short-term analyzer
         env:
-          TELEGRAM_TOKEN:  ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_TOKEN:        ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+          TAVILY_API_KEY:        ${{ secrets.TAVILY_API_KEY }}
+          GEMINI_API_KEYS:       ${{ secrets.GEMINI_API_KEYS }}
+          GEMINI_MODEL:          ${{ vars.GEMINI_MODEL          || 'gemini-2.5-flash' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || 'gemini-2.0-flash' }}
+          GEMINI_REQUEST_DELAY:  '2.0'
+          STOCK_LIST:            ${{ secrets.STOCK_LIST }}
         run: python src/analyzer.py

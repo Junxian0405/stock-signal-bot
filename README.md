@@ -1,252 +1,222 @@
-# 📊 Stock Signal Bot
+# 📊 Short-Term Trading Signal Bot
 
-Runs entirely on **GitHub Actions** — free, no server, no Mac needs to be on.
-Sends plain-English **Buy / Sell / Hold** signals straight to your **Telegram** every hour during US market hours, plus a dedicated deep scan before the market opens every morning.
+完全跑在 **GitHub Actions** 上 —— 免费、无需服务器、电脑不用开机。
+专为**日内交易 ~ 波段交易**（持仓周期：日内 ~ 1周）设计，每天在 6 个**黄金时段**自动推送 **Telegram 信号**，结合**短线优化的技术指标 + 实时新闻 + Google Gemini AI** 综合分析，给出 **1-10 分**买卖评分。
 
-**Market:** NASDAQ / NYSE  
-**Schedule:** Mon–Fri, 04:00 AM – 8:00 PM ET  
-**Pre-market scans:** 04:00, 07:00, 09:00 ET (deep scan with gap alerts)  
-**Data:** Yahoo Finance via yfinance (~15 min delay during live hours)  
-**Language:** Python · Runs free on GitHub Actions
-
----
-
-## 🧠 How Signals Work
-
-The bot runs **13 technical indicators** on every stock in your watchlist. Each indicator casts a BUY or SELL vote. The final signal is decided by how many agree:
-
-| Signal | What it means | Votes needed |
-|---|---|---|
-| ✅✅ STRONG BUY | Very high confidence — many indicators agree | 7+ say BUY |
-| ✅ BUY | Looks good to enter | 5–6 say BUY |
-| ⏸ HOLD | Mixed signals — no clear direction yet | Fewer than 5 either way |
-| ❌ SELL | Consider exiting or avoiding | 5–6 say SELL |
-| ❌❌ STRONG SELL | High confidence — get out or avoid | 7+ say SELL |
-
-### The 13 Indicators
-
-| # | Indicator | What it checks |
-|---|---|---|
-| 1 | **RSI** | Is the stock oversold (cheap) or overbought (expensive)? |
-| 2 | **MACD** | Is momentum turning upward or downward? |
-| 3 | **EMA 9 / 21** | Short-term trend — is the fast line above or below the slow line? |
-| 4 | **MA 50 / 200** | Long-term trend — is price above or below its long-term average? |
-| 5 | **Bollinger Band Breakout** | Did price break out of its normal range? |
-| 6 | **Bollinger %B** | Where exactly is price sitting inside the band? |
-| 7 | **OBV Trend** | Is money overall flowing into or out of this stock? |
-| 8 | **OBV Divergence** | Is smart money quietly buying while price is still down (or vice versa)? |
-| 9 | **Volume Surge** | Is trading volume unusually high (2× normal or more)? |
-| 10 | **Stochastic** | Is short-cycle momentum at a turning point? |
-| 11 | **VWAP** | Is today's price above or below today's average traded price? |
-| 12 | **RSI Divergence** | Hidden reversal signal — price going one way, RSI going another |
-| 13 | **ATR Expanding** | Is volatility expanding to confirm the move? |
-
-### Special Alerts
-
-On top of the main signal, the bot also highlights:
-
-- 🔵 **Bollinger Squeeze** — bands are very tight, a big move is building up
-- 🚀 **Gap Up** — stock opened 2%+ higher than yesterday (strong overnight interest)
-- 💥 **Gap Down** — stock opened 2%+ lower than yesterday (bad news or heavy selling)
-- 🔥 **Volume Surge** — trading volume is 2× or more above the 20-day average
-- 🧠 **OBV / RSI Divergence** — hidden smart money signal detected
+**市场：** NASDAQ / NYSE
+**数据：** Yahoo Finance via yfinance（盘中约 15 分钟延迟）
+**新闻：** Tavily API（近 3 天个股新闻 + 美国宏观/政策）
+**AI：** Google Gemini 2.5 Flash（自动 fallback 到 2.0 Flash）
+**语言：** Python 3.11
 
 ---
 
-## 📱 What Your Telegram Message Looks Like
+## 🧠 信号是怎么来的
 
-**Standard hourly scan:**
-```
-📊 Stock Signal Report
-📈 Market Hours  ·  2025-05-06 11:00 ET
-
-Here is what the market is telling us right now:
-
-━━━━━━━━━━━━━━━━━━━━━━━
-NVDA   $875.00
-
-✅✅ STRONG BUY — Very high confidence. Many signals agree.
-
-Confidence: 🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜⬜⬜⬜
-8/13 signals say BUY
-
-Why the bot says this:
-  💪 Healthy momentum (RSI 38) — buyers are active and in control
-  📊 Short-term trend is UP — the fast line crossed above the slow line
-  🏔 Long-term trend is UP — price is above the 200-day average (healthy)
-  ⬆️ Price broke above the upper Bollinger Band — strong upward breakout
-  🔥 Volume is 2.8× above normal — unusually heavy buying activity detected
-  🧠 Smart money is quietly buying while price is still down (hidden bullish signal)
-  🔄 Momentum just flipped upward from oversold zone — early buy signal confirmed
-  📍 Price $875 is ABOVE today's average traded price $861 — buyers dominating today
-
-Special alerts:
-  ⚡ BB Breakout UP
-  ⚡ Volume Surge 2.8x
-  ⚡ RSI Bull Divergence
-
-Numbers: RSI 38 · MACD 0.42 · BB%B 0.12 · Vol 2.8x · MA50 840 · MA200 720
-
-━━━━━━━━━━━━━━━━━━━━━━━
-Summary
-  ✅ 3 stock(s) — BUY signal
-  ❌ 2 stock(s) — SELL signal
-  ⏸ 5 stock(s) — No clear signal, wait
-
-⚠️ Not financial advice. Always do your own research before trading.
-```
-
-**Pre-market deep scan (04:00 / 07:00 / 09:00 ET):**
-```
-🌅 Pre-Market Early Warning
-Before the market opens  ·  2025-05-06 07:00 ET
-
-Here is what to watch before 9:30 AM:
-
-━━━━━━━━━━━━━━━━━━━━━━━
-TSLA   $172.50
-
-✅ BUY — Looks good to enter a position.
-
-Confidence: 🟩🟩🟩🟩🟩🟩⬜⬜⬜⬜⬜⬜⬜
-6/13 signals say BUY
-
-Why the bot says this:
-  🚀 Opened +3.2% HIGHER than yesterday — strong overnight interest or good news
-  🔥 Volume is 3.1× above normal — unusually heavy buying activity detected
-  🔵 Bollinger Bands are very tight (squeeze) — a big move is building up
-  💰 Overall money flow is moving INTO this stock — accumulation in progress
-
-Special alerts:
-  ⚡ GAP UP +3.20%
-  ⚡ Volume Surge 3.1x
-  ⚡ BB Squeeze — big move coming
-
-Numbers: RSI 44 · MACD 0.18 · BB%B 0.51 · Vol 3.1x · MA50 168 · MA200 195
-
-━━━━━━━━━━━━━━━━━━━━━━━
-⚡ Watch closely at open: TSLA, NVDA
-These have the strongest signals going into the open.
-```
-
----
-
-## 🚀 Setup Guide (5 Steps)
-
-### Step 1 — Create a Telegram Bot
-
-1. Open Telegram → search for **@BotFather**
-2. Send `/newbot` → follow the prompts → copy your **Bot Token** (looks like `123456:ABCdef...`)
-3. Send any message to your new bot to start the chat
-4. Get your **Chat ID** — open this URL in your browser (replace `<YOUR_TOKEN>`):
-   ```
-   https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
-   ```
-   Look for `"chat":{"id": 123456789}` in the response — that number is your Chat ID
-
----
-
-### Step 2 — Create a GitHub Repository
-
-1. Go to [github.com](https://github.com) → click **New repository**
-2. Name it anything you like, e.g. `stock-signal-bot`
-3. Set visibility to **Private** (recommended) or Public
-4. Upload all 4 files keeping this exact folder structure:
+每只股票分析流程：
 
 ```
-your-repo/
-├── .github/
-│   └── workflows/
-│       └── stock-alert.yml    ← the scheduler
-├── src/
-│   └── analyzer.py            ← the brain
-├── requirements.txt           ← Python packages
-└── README.md                  ← this file
+1h K线 (60天)      ─┐
+日线 (3月)         ─┤── 短线技术指标 ── 买/卖 各 0-10 分
+                    │
+Tavily 新闻         ─┤
+宏观/政策新闻       ─┴── Gemini AI ── 综合评分 1-10 + 执行建议
 ```
 
-> ⚠️ The `.github` folder must be at the **root** of the repo. If it ends up inside another folder the workflow will not trigger.
+### 📐 1-10 评分对应建议
+
+| 分数 | 建议 | 含义 |
+|------|------|------|
+| **10** | 🚀🚀 强烈买入 | 极强买入信号（多重技术确认 + 强催化剂） |
+| **8-9** | 🚀🚀 强烈买入 | 多指标一致看涨，新闻面正向 |
+| **6-7** | 🟢 买入 | 趋势向好，可考虑入场 |
+| **5** | 🟡 观望 | 信号矛盾或方向不明，等待更清晰信号 |
+| **3-4** | 🔴 卖出 | 技术转弱或催化剂转负，建议减仓 |
+| **1-2** | ❌❌ 强烈卖出 | 多指标看跌或重大利空，立即离场 |
+
+### 🎯 短线指标组合（每个都为日内/波段优化）
+
+| # | 指标 | 设置 | 作用 |
+|---|------|------|------|
+| 1 | **RSI(7)** | 短周期 7（标准 14 太慢） | 短线超买超卖 |
+| 2 | **MACD(5/13/5)** | Linda Raschke 日内经典 | 短期动能转折 |
+| 3 | **EMA 9/21** | 短期均线交叉 | 短线趋势方向 |
+| 4 | **VWAP（当日）** | 仅用当日 bar 计算 | 日内多空分界 |
+| 5 | **Bollinger Bands(20)** | %B + 收窄 + 突破 | 波动率 / 突破信号 |
+| 6 | **Stochastic(9,3)** | 比标准 14,3 更快 | 短期反转拐点 |
+| 7 | **Volume Surge** | ≥1.8x 20-bar 均量 | 资金确认 |
+| 8 | **ATR(14)** | 日线 ATR | 止损距离参考 |
+| 9 | **5-bar 动能** | 近 5 根 1h 涨跌幅 | 短线方向强度 |
+| 10 | **Gap** | 日线跳空 ≥1.5% | 盘前催化 |
+| 11 | **近 10 日支撑/压力** | 日线高低点 | 入场/止损位 |
+
+> 💡 **删除了哪些**：MA50/MA200、OBV、RSI 日线背离 —— 这些是长线/趋势确认指标，对日内—周交易意义不大。
+
+### 📋 报告会告诉你
+
+每只股票都会输出：
+
+- 🎯 **入场区间**（不是单一价格，而是合理建仓范围）
+- 📍 **双目标价**（短期 1-3 天 + 1 周）
+- 🛑 **ATR 止损价**（基于实际波动率）
+- ⏱ **建议持仓周期**（日内 / 2-3 天 / 3-5 天 / 1 周）
+- 💪 **信心度**（指标与新闻的一致性）
+- 📰 **新闻影响摘要** + 🔮 **未来 1 周潜在催化剂**
+- 💡 **具体执行建议**（什么价位买/卖、何时止损）
 
 ---
 
-### Step 3 — Add Your Telegram Secrets
+## ⏰ 触发时段（每日 6 次黄金窗口）
 
-In your repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+| # | 时间 (ET) | 时段 | 为什么是关键时刻 |
+|---|----------|------|-----------------|
+| 1 | **08:30** | 盘前 | CPI/PPI/Jobs/GDP 等经济数据高峰发布时段 |
+| 2 | **09:45** | 开盘 15 分钟后 | 跳过开盘剧烈震荡，初步方向确认 |
+| 3 | **10:30** | 开盘 1 小时后 | 首小时反转窗口，机构建仓关键点 |
+| 4 | **14:00** | 午后 | FOMC 利率声明固定时段 |
+| 5 | **15:30** | Power Hour | 最后 30 分钟，决定是否过夜 |
+| 6 | **16:15** | 收盘后 15 分钟 | 财报集中发布时段 |
 
-Add these two secrets exactly as shown:
+### ⚠️ 关于时区的重要说明
 
-| Secret Name | Where to get it |
-|---|---|
-| `TELEGRAM_TOKEN` | From @BotFather when you created the bot |
-| `TELEGRAM_CHAT_ID` | From the getUpdates URL in Step 1 |
+工作流 cron 使用 **UTC** 时间，按 **EDT（夏令时，UTC-4）** 校准。
+
+- ✅ **3 月 ~ 11 月（EDT）**：上面的 ET 时间**准确**
+- ⚠️ **11 月 ~ 3 月（EST，UTC-5）**：所有触发会**晚 1 小时**（例如 08:30 ET 变 09:30 ET 触发）
+
+**处理方式（任选一种）：**
+1. 接受冬季晚 1 小时（多数短线交易者按 ET 思考，习惯就好）
+2. 每年 3 月 / 11 月手动调整 `.github/workflows/stock-alert.yml` 里的 cron（所有时数 ±1）
+3. 切换到 `cron-utils` + 自建调度（复杂度高，不推荐）
+
+> 📅 **2026 年 EDT/EST 切换日**：3 月 8 日（开始 EDT）、11 月 1 日（开始 EST）
 
 ---
 
-### Step 4 — Enable GitHub Actions
+## 🚀 部署指南
 
-1. Click the **Actions** tab in your repo
-2. If prompted, click **"I understand my workflows, go ahead and enable them"**
-3. To test right away: click **Stock Signal Bot** → **Run workflow** → **Run workflow**
+### Step 1 — 准备 Telegram Bot
 
-You should get a Telegram message within 1–2 minutes. If nothing arrives, check **Actions** → click the run → read the logs for errors.
+1. Telegram 搜索 **@BotFather** → 发送 `/newbot` → 复制 **Bot Token**
+2. 给新 bot 发任意消息以激活会话
+3. 浏览器打开 `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
+4. 在响应里找到 `"chat":{"id": 123456789}` —— 这个数字就是 **Chat ID**
 
----
+### Step 2 — 准备 API Keys
 
-### Step 5 — Customize Your Watchlist
+| 服务 | 用途 | 获取方式 |
+|------|------|---------|
+| **Telegram** | 接收推送 | @BotFather |
+| **Google Gemini** | AI 综合分析 | https://aistudio.google.com/apikey（免费配额充足） |
+| **Tavily** | 新闻搜索 | https://tavily.com（每月 1000 次免费） |
 
-Open `src/analyzer.py` and find the `WATCHLIST` near the top of the file:
+> 💡 **Gemini 多 key 轮换**：建议申请 2-3 个 Gemini key 用逗号分隔，自动规避配额限制
 
-```python
-WATCHLIST = [
-    "AAPL", "MSFT", "NVDA", "TSLA", "AMZN",
-    "GOOGL", "META", "AMD", "INTC", "SPY"
-]
+### Step 3 — Fork / Clone 仓库
+
+```
+stock-signal-bot/
+├── .github/workflows/stock-alert.yml    # 调度器
+├── src/analyzer.py                       # 核心分析逻辑
+├── requirements.txt                      # Python 依赖
+└── README.md
 ```
 
-Add, remove, or replace any tickers you want to track. Use the exact ticker symbol from Yahoo Finance or NASDAQ (e.g. `"PLTR"`, `"SOFI"`, `"ARM"`, `"SMCI"`).
+### Step 4 — 配置 GitHub Secrets
 
-> 💡 Keep the list under 20 tickers to stay within GitHub Actions' 10-minute timeout per run.
+仓库 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+| Secret Name | 必填 | 内容 |
+|-------------|------|------|
+| `TELEGRAM_TOKEN` | ✅ | Telegram Bot Token |
+| `TELEGRAM_CHAT_ID` | ✅ | Telegram Chat ID |
+| `GEMINI_API_KEYS` | ✅ | 一个或多个 Gemini key，逗号分隔 |
+| `TAVILY_API_KEY` | ✅ | Tavily API Key |
+| `STOCK_LIST` | 可选 | 自选股，逗号分隔（如 `MU,SNDK,NVDA,AMD`），不设则用默认 |
+
+可选 Repository Variables（**Settings → Variables**）：
+- `GEMINI_MODEL` — 默认 `gemini-2.5-flash`
+- `GEMINI_MODEL_FALLBACK` — 默认 `gemini-2.0-flash`
+
+### Step 5 — 启用并测试
+
+1. 仓库 → **Actions** 标签 → 启用 workflows
+2. 选择 **短线交易信号 Short-Term Signal Bot** → **Run workflow** 手动触发一次
+3. 1-2 分钟内应该收到 Telegram 推送
+4. 没收到 → 看 **Actions** run 的日志排查
 
 ---
 
-## ⏰ Full Schedule
+## 📱 报告示例
 
-The bot runs automatically Mon–Fri on this schedule (all times ET):
+```
+📊 短线交易信号报告
+🌅 盘前 ｜ 📅 2026-05-14 08:30 ET
+1h技术指标 + 实时新闻 + Gemini AI 综合评分 (1-10)
 
-| Time (ET) | Session | What happens |
-|---|---|---|
-| 04:00 AM | 🌅 Pre-market | Deep scan — overnight gaps, early volume |
-| 07:00 AM | 🌅 Pre-market | Mid scan — news building, futures direction |
-| 09:00 AM | 🌅 Pre-market | Final warning — 30 min before open |
-| 09:30 AM | 📈 Market open | First market-hours signal |
-| 10:00 – 15:00 | 📈 Market hours | Hourly signals |
-| 04:00 PM | 📈 Market close | Closing signal |
-| 05:00 – 08:00 PM | 🌆 After-hours | Hourly after-hours signals |
+━━━━━━━━━━━━━━━━━━━━━━
+NVDA NVIDIA ｜ $895.40 📈 +2.34%
+
+🚀🚀 强烈买入  🟩🟩🟩🟩🟩🟩🟩🟩🟩⬜  9/10
+   AI 推理需求超预期 + 突破 BB 上轨，放量确认
+
+⏱ 持仓 2-3天 ｜ 🟡 风险 中 ｜ 💪 信心 高
+
+🎯 入场区间 $890.00 ~ $898.00
+📍 目标1 $920 ｜ 目标2 $950
+🛑 止损 $872
+
+📊 技术面  买 8/10 ｜ 卖 1/10
+   RSI(7) 64 · MACD +0.420 · BB%B 0.92
+   VWAP $887 · Vol 2.8x · 动能 +3.45%
+   支撑 $860 · 压力 $902 · ATR $14.50
+   ⚡ BB 上轨突破 · 放量 2.8x↑ · MACD 金叉
+
+📰 新闻：CSP 厂商 Q3 GPU 订单创纪录
+🔮 催化剂：5/22 财报，可能上修指引
+💡 执行建议：$890-898 分批买入，3 天目标 $920，跌破 $872 止损
+🤖 gemini-2.5-flash
+
+━━━━━━━━━━━━━━━━━━━━━━
+📋 汇总
+🚀🚀 强烈买入 2 ｜ 🟢 买入 1 ｜ 🟡 观望 1 ｜ 🔴 卖出 0 ｜ ❌❌ 强烈卖出 0
+⭐ 重点关注：NVDA(9), AMD(7), MU(7)
+
+⚠️ AI 辅助生成，仅供短线交易参考，不构成投资建议。请严格执行止损。
+```
 
 ---
 
 ## ❓ FAQ
 
-**Why is the price not exactly live?**  
-Yahoo Finance free data has about a 15-minute delay during market hours. For swing trading, pre-market gap detection, and squeeze signals this is completely fine — these setups develop over hours, not seconds. For tick-by-tick day trading you would need a paid real-time data source.
+**Q：为什么用 1h K 线而不是日线？**
+A：短线交易需要更快的信号。日线对持仓周期 1-7 天的交易者太慢，关键的盘中突破/反转在日线上看不出来。1h K 线在 60 天数据下提供约 400 根 bar，对短线指标足够。
 
-**Can I track more than 10 stocks?**  
-Yes — just add more tickers to `WATCHLIST`. Keep it under 20 to stay within the 10-minute GitHub Actions timeout per run.
+**Q：价格不是实时的吗？**
+A：Yahoo Finance 免费数据约 15 分钟延迟。对于"日内 ~ 1 周"持仓的策略完全够用 —— 我们追的是趋势和突破，不是 tick 级别的快讯。
 
-**I did not get a message at a certain hour. Is that normal?**  
-GitHub Actions cron can occasionally run a few minutes late or skip a run during peak load on their servers. This is rare and normal for the free tier.
+**Q：能加多少只股票？**
+A：建议 ≤15 只。每只约 8-10 秒（数据 + 新闻 + AI），超过 15 只可能撞 GitHub Actions 的 15 分钟 timeout。也要注意 Tavily/Gemini 的免费额度。
 
+**Q：免费 API 额度够用吗？**
+A：
+- **Gemini 2.5 Flash 免费版**：每分钟 10 次 / 每日 250 次 → 单 key 跑 15 只股票 × 6 次/天 = 90 次/天，**够用**
+- **Tavily 免费版**：每月 1000 次 → 15 只 × 2 次/触发 × 6 次/天 × 22 工作日 ≈ 3960 次，**不够，建议升级或减少股票数**
 
-**How do I stop the bot completely?**  
-Go to your repo → **Actions** tab → click **Stock Signal Bot** → click **Disable workflow**.
+**Q：AI 挂了会发空报告吗？**
+A：不会。Gemini 全挂时自动 fallback 到纯技术评分推导的建议（基于 ATR 算出入场/止损/目标位）。
 
-**How do I change the scan times or frequency?**  
-Edit `.github/workflows/stock-alert.yml` and adjust the cron lines. All times in the workflow file are in UTC, not ET.
+**Q：能自动下单吗？**
+A：不能。本 bot 只读市场数据 + 发 Telegram。**不连接任何券商**。
 
-**Can the bot place trades automatically?**  
-No. This bot is read-only — it only reads market data and sends Telegram messages. It does not connect to any brokerage and cannot place orders.
+**Q：怎么关闭？**
+A：Actions 标签 → 短线交易信号 → **Disable workflow**
+
+**Q：怎么改触发时间？**
+A：编辑 `.github/workflows/stock-alert.yml`，注意 cron 是 **UTC** 时间。EDT 时段 UTC = ET + 4，EST 时段 UTC = ET + 5。
 
 ---
 
-## ⚠️ Disclaimer
+## ⚠️ 免责声明
 
-This bot is for **informational and educational purposes only**. It does not constitute financial advice. Signals are generated purely from technical indicators applied to historical price data — past patterns do not guarantee future results. Always do your own research and consider consulting a licensed financial advisor before making any investment or trading decision. You trade entirely at your own risk.
+本工具仅供**信息和教育用途**。所有信号基于历史数据的技术指标与 AI 推断生成 —— **历史规律不保证未来表现**。投资有风险，入市需谨慎，所有交易决策请自行判断并咨询持牌财务顾问。**严格执行止损是短线交易的生命线**。
