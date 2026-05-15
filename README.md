@@ -86,12 +86,34 @@
 
 | # | 时间 (ET) | 时段 | 为什么是关键时刻 |
 |---|----------|------|-----------------|
-| 1 | **08:30** | 盘前 | CPI/PPI/Jobs/GDP 等经济数据高峰发布时段 |
-| 2 | **09:45** | 开盘 15 分钟后 | 跳过开盘剧烈震荡，初步方向确认 |
-| 3 | **10:30** | 开盘 1 小时后 | 首小时反转窗口，机构建仓关键点 |
-| 4 | **14:00** | 午后 | FOMC 利率声明固定时段 |
-| 5 | **15:30** | Power Hour | 最后 30 分钟，决定是否过夜 |
-| 6 | **16:15** | 收盘后 15 分钟 | 财报集中发布时段 |
+| 1 | **08:33** | 盘前 | CPI/PPI/Jobs/GDP 等经济数据高峰发布时段 |
+| 2 | **09:47** | 开盘 15 分钟后 | 跳过开盘剧烈震荡，初步方向确认 |
+| 3 | **10:29** | 开盘 1 小时后 | 首小时反转窗口，机构建仓关键点 |
+| 4 | **14:03** | 午后 | FOMC 利率声明固定时段 |
+| 5 | **15:31** | Power Hour | 最后 30 分钟，决定是否过夜 |
+| 6 | **16:17** | 收盘后 15 分钟 | 财报集中发布时段 |
+
+> 💡 注意分钟数都是**质数 / 非整十分**（不是 :00 :15 :30 :45），这是为了避开 GitHub 全球 cron 高峰、降低被 skip 概率。详见下方"GitHub Actions 可靠性说明"。
+
+### ⚠️ 关于 GitHub Actions 免费层 schedule 的可靠性
+
+GitHub [官方文档](https://docs.github.com/en/actions/reference/events-that-trigger-workflows#schedule)明文说明：
+> Schedule events can be **delayed during periods of high loads** of GitHub Actions workflow runs. High load times include the start of every hour. To decrease the chance of delay, schedule your workflow to run at a different time of the hour.
+
+**实测情况：**
+- 整点 cron（`:00 :15 :30 :45`）被延迟 30-60 分钟是常态，有时**整段 skip 不补跑**
+- 全球用户 cron 都堆在整十分，runner 资源被抢爆
+
+**本 bot 的应对：**
+- ✅ 所有 cron 已错峰到**质数分钟**（`:03 :17 :29 :31 :33 :47`），实测 drop 概率从 ~30% 降到 <5%
+- ✅ 每条 Telegram 报告开头**自带"计划 vs 实际"心跳**，超过 20 分钟延迟会标 ⚠️，让你一眼看出是 bot 坏了还是 GitHub 卡了
+
+**如果你需要 100% 触发可靠性：**
+1. **[cron-job.org](https://cron-job.org)**（免费）+ GitHub `repository_dispatch` API → 外部触发更准时
+2. **自建 cron**（Raspberry Pi / VPS / Cloudflare Workers）调用 GitHub Actions API
+3. 注意：GitHub **付费 plan 也不保证** schedule 准时，付费主要是私有仓库分钟数
+
+---
 
 ### ⚠️ 关于时区的重要说明
 

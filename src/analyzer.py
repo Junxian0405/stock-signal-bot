@@ -776,13 +776,64 @@ def get_session(now_et: datetime) -> str:
     elif 960 <= total < 1200: return "After-Hours"
     else:                     return "Off-Hours"
 
-def build_header(time_str: str, session: str, n: int) -> str:
-    """开头消息：时段 + 标题。"""
+# 6 个预定 ET 时段（与 .github/workflows/stock-alert.yml 中 cron 的"原计划时间"对应）
+# 这些是逻辑/语义时间，cron 实际为了避开高峰偏移了 ±3 分钟
+PLANNED_ET_TIMES = [
+    (8, 30, "经济数据 / 早盘"),
+    (9, 45, "开盘后方向确认"),
+    (10, 30, "首小时反转窗口"),
+    (14, 0,  "FOMC / 午后"),
+    (15, 30, "Power Hour"),
+    (16, 15, "收盘后 / 财报"),
+]
+
+def match_planned_time(now_et: datetime) -> tuple[str, int]:
+    """
+    找出离当前 ET 时间最近的"预定 cron 时间"，返回 (planned_HHMM, delay_min)。
+    用于在 Telegram 头部显示"计划 X / 实际 Y (延迟 Z min)"。
+    """
+    now_min = now_et.hour * 60 + now_et.minute
+    best = None
+    best_diff = 10 ** 9
+    for h, m, _ in PLANNED_ET_TIMES:
+        planned = h * 60 + m
+        # 不允许"未来时间"（实际触发只会等于或晚于计划），所以只在 planned <= now 时计算
+        if planned > now_min:
+            # workflow_dispatch 手动触发可能落在任何时间，回退到全集找最近
+            continue
+        d = now_min - planned
+        if d < best_diff:
+            best_diff = d
+            best = (h, m)
+    if best is None:
+        # 没有"已过的"预定时间 → 取整天最近的（绝对差），可能是手动触发或新一天的盘前
+        for h, m, _ in PLANNED_ET_TIMES:
+            d = abs((h * 60 + m) - now_min)
+            if d < best_diff:
+                best_diff = d
+                best = (h, m)
+    return f"{best[0]:02d}:{best[1]:02d}", best_diff
+
+def build_header(time_str: str, session: str, n: int, now_et: datetime) -> str:
+    """开头消息：时段 + 标题 + 心跳（延迟显示）。"""
     sess_e  = SESSION_EMOJI.get(session, "")
     sess_zh = SESSION_NAME_ZH.get(session, session)
+
+    planned, delay = match_planned_time(now_et)
+    actual = now_et.strftime("%H:%M")
+    if delay <= 5:
+        timing_line = f"⏰ 计划 {planned} / 实际 {actual} ET ✅"
+    elif delay <= 20:
+        timing_line = f"⏰ 计划 {planned} / 实际 {actual} ET ({delay}min 内可接受)"
+    elif delay <= 60:
+        timing_line = f"⏰ 计划 {planned} / 实际 {actual} ET ⚠️ 延迟 {delay}min（GitHub 拥挤）"
+    else:
+        timing_line = f"⏰ 计划 {planned} / 实际 {actual} ET 🐌 严重延迟 {delay}min"
+
     return (
         f"<b>📊 短线交易信号报告</b>\n"
         f"{sess_e} <b>{sess_zh}</b> ｜ 📅 {time_str}\n"
+        f"{timing_line}\n"
         f"<i>1h技术指标 + 实时新闻 + Gemini AI 综合评分 (1-10)</i>\n"
         f"📦 共 {n} 支股票，按评分高→低推送"
     )
@@ -884,8 +935,8 @@ def main():
     # 按评分排序，高分先推
     results.sort(key=lambda r: -int(r["ai"].get("score", 5)))
 
-    # 1) 开头消息
-    send_telegram(build_header(time_str, session, len(results)))
+    # 1) 开头消息（带心跳：计划时间 vs 实际时间，显示 GitHub 延迟）
+    send_telegram(build_header(time_str, session, len(results), now_et))
 
     # 2) 每只股票一条独立消息（避免单条消息过长）
     for r in results:
